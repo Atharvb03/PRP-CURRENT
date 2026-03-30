@@ -11,6 +11,11 @@ const projectSchema = new mongoose.Schema({
     enum: ['6_months', '1_year'],
     default: '6_months',
   },
+  // ADDED: project completion status
+  isCompleted: {
+    type: Boolean,
+    default: false,
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Project', projectSchema);

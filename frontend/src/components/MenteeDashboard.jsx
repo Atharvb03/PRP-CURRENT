@@ -58,6 +58,11 @@ export default function MenteeDashboard() {
   });
   // ADDED: finalRemark locks uploads when set
   const [projectFinalRemark, setProjectFinalRemark] = useState(null);
+  // ADDED: track if mentee can create new project
+  const [canCreateNewProject, setCanCreateNewProject] = useState(true);
+  // ADDED: archived files from previous projects
+  const [archivedFiles, setArchivedFiles] = useState([]);
+  const [showArchivedFiles, setShowArchivedFiles] = useState(false);
   const navigate = useNavigate();
   const { dark, toggle } = useTheme();
   const menteeEmail = localStorage.getItem('userEmail') || '';
@@ -94,6 +99,9 @@ export default function MenteeDashboard() {
       if (r.data.extendedDeadline) setExtendedDeadline(new Date(r.data.extendedDeadline));
       localStorage.setItem('uploads', JSON.stringify(map));
       setUploads(map);
+      
+      // Store archived files
+      setArchivedFiles(r.data.archivedFiles || []);
     } catch {
       const stored = JSON.parse(localStorage.getItem('uploads')) || {};
       setUploads(stored);
@@ -134,6 +142,8 @@ export default function MenteeDashboard() {
       if (d.duration) setProjectDuration(d.duration);
       // ADDED: lock uploads if project is finalised
       if (d.assignment?.finalRemark) setProjectFinalRemark(d.assignment.finalRemark);
+      // ADDED: check if mentee can create new project
+      setCanCreateNewProject(d.canCreateNewProject !== false);
       
       // Fetch files after we know project exists
       if (d.projectName) {
@@ -213,20 +223,20 @@ export default function MenteeDashboard() {
       
       console.log('Project created successfully:', res.data);
       
-      setProjectName(projectForm.projectName.trim());
-      setProjectDuration(projectForm.projectDuration);
-      setProjectDescription(projectForm.description?.trim() || '');
-      setGroupMembers(projectForm.groupMembers);
-      setProjectStatus('pending');
       showToast(res.data.message, 'success');
       
-      // Refresh status
-      const statusRes = await axios.get(`${API}/mentee/status`);
-      const d = statusRes.data.data;
-      setProjectName(d.projectName || '');
-      setProjectDuration(d.projectDuration || '6_months');
-      setProjectDescription(d.projectDescription || '');
-      setGroupMembers(d.groupMembers || []);
+      // Clear form
+      setProjectForm({
+        projectName: '',
+        projectDuration: '6_months',
+        description: '',
+        groupMembers: [],
+      });
+      
+      // Refresh the entire page to load fresh data
+      setTimeout(() => {
+        window.location.reload();
+      }, 1000);
     } catch (err) {
       console.error('Create project error:', err);
       console.error('Error response:', err.response?.data);
@@ -690,12 +700,16 @@ export default function MenteeDashboard() {
 
               {/* Project Section */}
               <div className="mb-6">
-                {!projectName ? (
+                {(!projectName || (projectName && canCreateNewProject)) ? (
                   /* Create Project Form */
                   <div className="glass rounded-2xl p-6" style={{ border: '1px solid rgba(236,72,153,0.12)' }}>
                     <div className="mb-4">
-                      <h2 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>Create Your Project</h2>
-                      <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>Set up your project details to start submissions</p>
+                      <h2 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>
+                        {projectName ? 'Create New Project' : 'Create Your Project'}
+                      </h2>
+                      <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                        {projectName ? 'Your previous project is completed. Start a new one!' : 'Set up your project details to start submissions'}
+                      </p>
                     </div>
                     <div className="space-y-4">
                       {/* Project Name */}
@@ -825,9 +839,19 @@ export default function MenteeDashboard() {
                       </div>
 
                       {/* Submit Button */}
+                      {!canCreateNewProject && projectName && (
+                        <div className="mb-4 p-4 rounded-xl" style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)' }}>
+                          <p className="text-sm font-medium" style={{ color: '#f59e0b' }}>
+                            ⚠️ Complete your current project to create a new one
+                          </p>
+                          <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                            Your mentor must submit a final remark before you can start a new project.
+                          </p>
+                        </div>
+                      )}
                       <button
                         onClick={handleCreateProject}
-                        disabled={creatingProject || !projectForm.projectName?.trim()}
+                        disabled={creatingProject || !projectForm.projectName?.trim() || !canCreateNewProject}
                         className="btn-primary-custom w-full py-3 rounded-xl text-white font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                       >
                         {creatingProject ? (
@@ -838,6 +862,8 @@ export default function MenteeDashboard() {
                             </svg>
                             Creating Project...
                           </>
+                        ) : !canCreateNewProject ? (
+                          '🔒 Complete Current Project First'
                         ) : (
                           'Create Project'
                         )}
@@ -1199,6 +1225,101 @@ export default function MenteeDashboard() {
               </tbody>
             </table>
           </div>
+          
+          {/* ── ARCHIVED FILES SECTION ── */}
+          {archivedFiles.length > 0 && (
+            <div className="mt-8">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-xl font-bold" style={{ color: 'var(--text-primary)' }}>
+                    📦 Previous Projects Archive
+                  </h2>
+                  <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                    View-only access to files from completed projects
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowArchivedFiles(!showArchivedFiles)}
+                  className="px-4 py-2 rounded-xl text-sm font-medium transition-all"
+                  style={{ 
+                    background: showArchivedFiles ? 'rgba(236,72,153,0.15)' : 'rgba(236,72,153,0.08)', 
+                    color: '#f472b6',
+                    border: '1px solid rgba(236,72,153,0.2)'
+                  }}
+                >
+                  {showArchivedFiles ? '👁️ Hide Archive' : '👁️ View Archive'}
+                </button>
+              </div>
+              
+              {showArchivedFiles && (
+                <div className="glass rounded-2xl overflow-hidden" style={{ border: '1px solid rgba(236,72,153,0.12)' }}>
+                  <div className="px-5 py-3" style={{ borderBottom: '1px solid rgba(236,72,153,0.1)', background: 'rgba(236,72,153,0.04)' }}>
+                    <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                      Archived Submissions ({archivedFiles.length} files)
+                    </p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid rgba(236,72,153,0.08)', background: 'rgba(255,255,255,0.02)' }}>
+                          <th className="px-4 py-2.5 text-left font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Project</th>
+                          <th className="px-4 py-2.5 text-left font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Stage</th>
+                          <th className="px-4 py-2.5 text-left font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>File</th>
+                          <th className="px-4 py-2.5 text-left font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Submitted</th>
+                          <th className="px-4 py-2.5 text-left font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Remark</th>
+                          <th className="px-4 py-2.5 text-left font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {archivedFiles.map((file, idx) => (
+                          <tr key={idx} style={{ borderBottom: idx < archivedFiles.length - 1 ? '1px solid rgba(236,72,153,0.06)' : 'none' }}>
+                            <td className="px-4 py-2.5 font-medium" style={{ color: 'var(--text-secondary)' }}>
+                              {file.archivedProjectName || 'Previous Project'}
+                            </td>
+                            <td className="px-4 py-2.5 capitalize" style={{ color: 'var(--text-primary)' }}>
+                              {file.section?.replace(/([A-Z])/g, ' $1').trim()}
+                            </td>
+                            <td className="px-4 py-2.5" style={{ color: 'var(--text-secondary)' }}>
+                              {file.file_name}
+                            </td>
+                            <td className="px-4 py-2.5" style={{ color: 'var(--text-muted)' }}>
+                              {file.submittedAt ? new Date(file.submittedAt).toLocaleDateString() : '—'}
+                            </td>
+                            <td className="px-4 py-2.5" style={{ 
+                              color: file.remark === 'Pending Review' ? '#f59e0b' : 
+                                     file.remark?.toLowerCase().includes('approved') ? '#10b981' : 
+                                     'var(--text-secondary)' 
+                            }}>
+                              {file.remark || '—'}
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <button
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  try {
+                                    const res = await axios.post(`${API}/files/secure-url`, {
+                                      s3Key: file.file_url,
+                                      menteeEmail,
+                                    });
+                                    if (res.data.success) window.open(res.data.url, '_blank');
+                                    else showToast('❌ Could not generate secure link.', 'error');
+                                  } catch { showToast('❌ Failed to get secure URL.', 'error'); }
+                                }}
+                                className="px-3 py-1 rounded-lg text-xs font-medium transition-all hover:scale-105"
+                                style={{ background: 'rgba(99,102,241,0.1)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.2)' }}
+                              >
+                                👁️ View
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
           )}
 
