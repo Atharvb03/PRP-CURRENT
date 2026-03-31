@@ -142,10 +142,24 @@ export default function MentorDashboard() {
     setUploads({}); // clear previous mentee's files immediately
     setRemarks({}); // clear previous mentee's remarks
     setFinalRemark(''); // clear final remark input
-    axios.get(`${API}/files/metadata/${selectedAssignment.menteeEmail}`)
+    
+    // Build URL with projectName filter for archived assignments
+    let url = `${API}/files/metadata/${selectedAssignment.menteeEmail}`;
+    if (selectedAssignment.isArchived) {
+      // For archived assignments, filter by specific project name
+      url += `?projectName=${encodeURIComponent(selectedAssignment.projectName)}`;
+    }
+    
+    axios.get(url)
       .then(r => {
         const map = {};
-        (r.data.data || []).forEach(f => {
+        // If assignment is archived, use archived files; otherwise use active files
+        // Note: finalRemark alone doesn't mean files are archived - they're only archived when mentee creates new project
+        const filesToDisplay = selectedAssignment.isArchived
+          ? (r.data.archivedFiles || [])
+          : (r.data.data || []);
+        
+        filesToDisplay.forEach(f => {
           map[f.section] = {
             fileURL:   f.file_url,
             filename:  f.file_name,
@@ -156,7 +170,7 @@ export default function MentorDashboard() {
         setUploads(map);
       })
       .catch(() => setUploads({}));
-  }, [selectedAssignment?.menteeEmail, mentorEmail]); // key on menteeEmail string, not object ref
+  }, [selectedAssignment?.menteeEmail, selectedAssignment?.projectName, selectedAssignment?.isArchived, selectedAssignment?.finalRemark, mentorEmail]);
 
   const handleRemarkChange = (section, val) =>
     setRemarks(prev => ({ ...prev, [section]: val }));
@@ -312,20 +326,51 @@ export default function MentorDashboard() {
         <p className="text-xs font-semibold px-1 mb-1" style={{ color: '#f472b6' }}>Assigned Mentees</p>
         {assignments.length === 0
           ? <p className="text-xs px-1" style={{ color: 'var(--text-muted)' }}>No assignments yet</p>
-          : assignments.map(a => (
-            <button key={a._id.toString()} onClick={() => setSelectedAssignment(a)}
-              className="w-full text-left px-3 py-2.5 rounded-xl mb-1 transition-all"
-              style={{
-                background: selectedAssignment?.menteeEmail === a.menteeEmail
-                  ? 'rgba(236,72,153,0.12)' : 'rgba(255,255,255,0.03)',
-                border: selectedAssignment?.menteeEmail === a.menteeEmail
-                  ? '1px solid rgba(236,72,153,0.25)' : '1px solid rgba(255,255,255,0.05)',
-              }}>
-              <p className="text-xs font-medium truncate" style={{ color: 'var(--text-primary)' }}>{a.menteeName || a.menteeEmail}</p>
-              <p className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>📁 {a.projectName}</p>
-              {a.finalRemark && <p className="text-xs mt-0.5" style={{ color: '#10b981' }}>✅ Accepted</p>}
-            </button>
-          ))
+          : (
+            <>
+              {/* Active Projects */}
+              {assignments.filter(a => !a.finalRemark && !a.isArchived).length > 0 && (
+                <>
+                  <p className="text-xs px-1 mb-1 mt-2" style={{ color: 'var(--text-muted)' }}>Active Projects</p>
+                  {assignments.filter(a => !a.finalRemark && !a.isArchived).map(a => (
+                    <button key={a._id.toString()} onClick={() => setSelectedAssignment(a)}
+                      className="w-full text-left px-3 py-2.5 rounded-xl mb-1 transition-all"
+                      style={{
+                        background: selectedAssignment?.menteeEmail === a.menteeEmail
+                          ? 'rgba(236,72,153,0.12)' : 'rgba(255,255,255,0.03)',
+                        border: selectedAssignment?.menteeEmail === a.menteeEmail
+                          ? '1px solid rgba(236,72,153,0.25)' : '1px solid rgba(255,255,255,0.05)',
+                      }}>
+                      <p className="text-xs font-medium truncate" style={{ color: 'var(--text-primary)' }}>{a.menteeName || a.menteeEmail}</p>
+                      <p className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>📁 {a.projectName}</p>
+                    </button>
+                  ))}
+                </>
+              )}
+              
+              {/* Completed Projects */}
+              {assignments.filter(a => a.finalRemark || a.isArchived).length > 0 && (
+                <>
+                  <p className="text-xs px-1 mb-1 mt-3" style={{ color: 'var(--text-muted)' }}>Completed Projects</p>
+                  {assignments.filter(a => a.finalRemark || a.isArchived).map(a => (
+                    <button key={a._id.toString()} onClick={() => setSelectedAssignment(a)}
+                      className="w-full text-left px-3 py-2.5 rounded-xl mb-1 transition-all"
+                      style={{
+                        background: selectedAssignment?.menteeEmail === a.menteeEmail
+                          ? 'rgba(16,185,129,0.12)' : 'rgba(16,185,129,0.05)',
+                        border: selectedAssignment?.menteeEmail === a.menteeEmail
+                          ? '1px solid rgba(16,185,129,0.25)' : '1px solid rgba(16,185,129,0.1)',
+                        opacity: 0.85
+                      }}>
+                      <p className="text-xs font-medium truncate" style={{ color: 'var(--text-primary)' }}>{a.menteeName || a.menteeEmail}</p>
+                      <p className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>📁 {a.projectName}</p>
+                      <p className="text-xs mt-0.5" style={{ color: '#10b981' }}>✅ {a.finalRemark || 'Completed'}</p>
+                    </button>
+                  ))}
+                </>
+              )}
+            </>
+          )
         }
 
         {/* Notifications */}
@@ -391,6 +436,12 @@ export default function MentorDashboard() {
                 style={{ background: 'rgba(168,85,247,0.1)', color: '#c084fc', border: '1px solid rgba(168,85,247,0.2)' }}>
                 📁 {selectedAssignment.projectName}
               </span>
+              {(selectedAssignment.finalRemark || selectedAssignment.isArchived) && (
+                <span className="text-xs px-3 py-1 rounded-full font-medium"
+                  style={{ background: 'rgba(16,185,129,0.15)', color: '#10b981', border: '1px solid rgba(16,185,129,0.3)' }}>
+                  ✅ Completed
+                </span>
+              )}
             </div>
           )}
           {/* Group Members (read-only) */}
@@ -428,12 +479,14 @@ export default function MentorDashboard() {
             ) : dashData ? (
               <div className="space-y-5">
                 {/* Stat cards */}
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                   {[
-                    { label: 'Assigned', value: dashData.stats.totalAssigned, color: '#f472b6', bg: 'rgba(236,72,153,0.1)', icon: '👥' },
+                    { label: 'Total Assigned', value: dashData.stats.totalAssigned, color: '#f472b6', bg: 'rgba(236,72,153,0.1)', icon: '👥' },
+                    { label: 'Current Projects', value: dashData.stats.currentProjects, color: '#818cf8', bg: 'rgba(99,102,241,0.1)', icon: '🔵' },
+                    { label: 'Completed Projects', value: dashData.stats.completedProjects, color: '#10b981', bg: 'rgba(16,185,129,0.1)', icon: '✅' },
                     { label: 'Pending Review', value: dashData.stats.totalPendingReview, color: '#f59e0b', bg: 'rgba(245,158,11,0.1)', icon: '⏳' },
                     { label: 'Late Submissions', value: dashData.stats.totalLate, color: '#f87171', bg: 'rgba(239,68,68,0.1)', icon: '🔴' },
-                    { label: 'Accepted', value: dashData.stats.totalAccepted, color: '#10b981', bg: 'rgba(16,185,129,0.1)', icon: '✅' },
+                    { label: 'Accepted', value: dashData.stats.totalAccepted, color: '#10b981', bg: 'rgba(16,185,129,0.1)', icon: '✔️' },
                   ].map(s => (
                     <div key={s.label} className="glass rounded-2xl p-4 flex flex-col gap-1"
                       style={{ border: `1px solid ${s.bg.replace('0.1','0.25')}` }}>

@@ -9,3 +9,15 @@ IAM User ID :
 username = PRP-user
 password = Atharv@03
 updated password =Atharv@04
+
+
+to delete data from mongodb database:
+
+cd Project-Review-Platform-PRP--main/backend
+node clear-data-keep-staff-safe.js
+
+
+git checkout -b production-ready1
+git add .
+git commit -m "Your message"
+git push origin batch-feature

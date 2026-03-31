@@ -282,6 +282,34 @@ function passwordResetOTPEmail({ userName, otp }) {
   };
 }
 
+// ─── Email Verification ───────────────────────────────────────────────────────
+function emailVerificationEmail({ name, verificationLink }) {
+  return {
+    subject: '✅ Verify Your Email - PRP Platform',
+    html: `
+      <div style="font-family:sans-serif;max-width:560px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px">
+        <h2 style="color:#ec4899;margin-bottom:4px">Welcome to PRP Platform!</h2>
+        <p style="color:#6b7280;margin-top:0">Hi ${name},</p>
+        <p style="color:#374151;line-height:1.6">
+          Thank you for signing up! Please verify your email address to activate your account.
+        </p>
+        <div style="text-align:center;margin:24px 0">
+          <a href="${verificationLink}" 
+             style="display:inline-block;background:#ec4899;color:#fff;padding:12px 32px;text-decoration:none;border-radius:8px;font-weight:600">
+            Verify Email Address
+          </a>
+        </div>
+        <p style="color:#6b7280;font-size:14px;line-height:1.6">
+          Or copy and paste this link into your browser:<br>
+          <a href="${verificationLink}" style="color:#ec4899;word-break:break-all">${verificationLink}</a>
+        </p>
+        <p style="color:#9ca3af;font-size:12px;margin-top:24px">
+          If you didn't create an account, please ignore this email.
+        </p>
+      </div>`,
+  };
+}
+
 module.exports = {
   sendEmail,
   remarkAddedEmail,
@@ -297,4 +325,5 @@ module.exports = {
   mentorChangedMenteeEmail,
   deadlineReminderEmail,
   passwordResetOTPEmail,
+  emailVerificationEmail,
 };

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Route, BrowserRouter as Router, Routes } from 'react-router-dom';
 import Banner from './components/Banner';
+import EmailVerify from './components/EmailVerify';
 import Footer from './components/Footer';
 import ForgotPassword from './components/ForgotPassword';
 import HODDashboard from './components/HODDashboard';
@@ -18,6 +19,7 @@ function App() {
         <Route path="/" element={<><Navbar /><Banner /><Footer /></>} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/login" element={<Login />} />
+        <Route path="/verify/:token" element={<EmailVerify />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/mentee-dashboard" element={<MenteeDashboard />} />
         <Route path="/mentor-dashboard" element={<MentorDashboard />} />

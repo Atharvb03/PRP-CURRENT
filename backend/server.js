@@ -4,6 +4,8 @@ const cors = require("cors");
 const multer = require("multer");
 const AWS = require("aws-sdk");
 const crypto = require("crypto");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 require("dotenv").config();
 
 const { MongoClient, ObjectId } = require("mongodb");
@@ -31,17 +33,67 @@ const {
 } = require("./utils/emailService");
 // ADDED: deadline reminder cron job
 const { initDeadlineReminder } = require("./jobs/deadlineReminder");
+// ADDED: Security and validation middleware
+const { errorHandler, asyncHandler } = require("./middleware/errorHandler");
+const { validateObjectId, sanitizeBody, sanitizeQuery } = require("./middleware/validation");
+const { createIndexes } = require("./config/indexes");
 
 const app = express();
-const PORT = 5000;
-const mongoURI = "mongodb://127.0.0.1:27017";
+const PORT = process.env.PORT || 5000;
+const mongoURI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017";
 
-// Middleware
+// ═══════════════════════════════════════════════════════════════════════════
+// SECURITY MIDDLEWARE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Helmet for security headers (CSP, XSS protection, etc.)
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    }
+  }
+}));
+
+// Rate limiting to prevent brute force and DoS attacks
+const limiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // limit each IP to 100 requests per windowMs
+  message: { success: false, message: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/', limiter);
+
+// Stricter rate limit for auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 requests per window
+  message: { success: false, message: 'Too many authentication attempts, please try again later.' }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BASIC MIDDLEWARE
+// ═══════════════════════════════════════════════════════════════════════════
+
 app.use(bodyParser.json());
+
+// CORS with environment-based origin
 app.use(cors({
-    origin: "http://localhost:5173",
+    origin: process.env.CORS_ORIGIN || "http://localhost:5173",
     credentials: true
 }));
+
+// Input sanitization to prevent NoSQL injection
+app.use(sanitizeBody);
+app.use(sanitizeQuery);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATABASE CONNECTION WITH ERROR HANDLING
+// ═══════════════════════════════════════════════════════════════════════════
 
 // MongoDB Setup
 const client = new MongoClient(mongoURI);
@@ -56,15 +108,29 @@ async function connectDB() {
         batchesCollection = db.collection("batches");
         console.log("✅ Connected to MongoDB");
         
-        // Create unique index on batch name
-        await batchesCollection.createIndex({ name: 1 }, { unique: true });
+        // Create database indexes for performance
+        await createIndexes(db);
         
         // Start deadline reminder cron job after DB is ready
         initDeadlineReminder(db, usersCollection);
     } catch (err) {
         console.error("❌ MongoDB connection error:", err);
+        console.error("❌ Server cannot start without database connection");
+        process.exit(1); // Exit if database connection fails
     }
 }
+
+// Handle MongoDB connection errors after initial connection
+client.on('error', (err) => {
+  console.error('❌ MongoDB connection error:', err);
+  process.exit(1);
+});
+
+client.on('close', () => {
+  console.error('❌ MongoDB connection closed unexpectedly');
+  process.exit(1);
+});
+
 connectDB();
 
 // AWS S3 Setup
@@ -123,8 +189,11 @@ app.post('/api/files/generate-upload-url', requireRole('mentee'), async (req, re
     ? fileType
     : (MIME_MAP[ext] || 'application/octet-stream');
 
-  // Verify mentee has an assignment
-  const assignment = await db.collection('assignments').findOne({ menteeEmail: menteeEmail.toLowerCase() });
+  // Verify mentee has an assignment (only check active assignments)
+  const assignment = await db.collection('assignments').findOne({ 
+    menteeEmail: menteeEmail.toLowerCase(),
+    isArchived: { $ne: true } // Only check active assignments
+  });
   if (!assignment) {
     return res.status(403).json({ success: false, message: 'Your project is not yet assigned to a mentor. Please wait for the coordinator to assign a mentor before uploading files.' });
   }
@@ -134,8 +203,11 @@ app.post('/api/files/generate-upload-url', requireRole('mentee'), async (req, re
     return res.status(403).json({ success: false, message: 'Your project has been finalised by your mentor. Uploads are no longer accepted.' });
   }
 
-  // ADDED: validate phase against project duration
-  const project = await projectsCollection.findOne({ menteeEmail: menteeEmail.toLowerCase() });
+  // ADDED: validate phase against project duration (only check active projects)
+  const project = await projectsCollection.findOne({ 
+    menteeEmail: menteeEmail.toLowerCase(),
+    isArchived: { $ne: true } // Only check active projects
+  });
   const duration = project?.duration || assignment?.duration || '6_months';
   const allowedPhases = getAllowedPhases(duration);
   if (!allowedPhases.includes(section)) {
@@ -183,7 +255,10 @@ app.post('/api/files/save-metadata', requireRole('mentee'), async (req, res) => 
   }
 
   try {
-    const assignment = await db.collection('assignments').findOne({ menteeEmail: menteeEmail.toLowerCase() });
+    const assignment = await db.collection('assignments').findOne({ 
+      menteeEmail: menteeEmail.toLowerCase(),
+      isArchived: { $ne: true } // Only check active assignments
+    });
     if (!assignment) {
       return res.status(403).json({ success: false, message: 'No assignment found for this mentee' });
     }
@@ -203,7 +278,11 @@ app.post('/api/files/save-metadata', requireRole('mentee'), async (req, res) => 
 
     // Upsert: replace existing metadata for same mentee+section
     await fileCol.updateOne(
-      { uploaded_by: menteeEmail.toLowerCase(), section },
+      { 
+        uploaded_by: menteeEmail.toLowerCase(), 
+        section,
+        isArchived: { $ne: true } // Only update active files
+      },
       {
         $set: {
           file_name:   fileName,
@@ -218,7 +297,7 @@ app.post('/api/files/save-metadata', requireRole('mentee'), async (req, res) => 
           submissionStatus,
           updatedAt:   now,
         },
-        $setOnInsert: { createdAt: now },
+        $setOnInsert: { createdAt: now, isArchived: false },
       },
       { upsert: true }
     );
@@ -263,7 +342,15 @@ app.post('/api/files/secure-url', requireRole('mentee', 'mentor', 'hod', 'projec
   }
 
   try {
-    const assignment = await db.collection('assignments').findOne({ menteeEmail: menteeEmail.toLowerCase() });
+    // Check for both active and archived assignments for access control
+    const activeAssignment = await db.collection('assignments').findOne({ 
+      menteeEmail: menteeEmail.toLowerCase(),
+      isArchived: { $ne: true }
+    });
+    const archivedAssignment = await db.collection('assignments').findOne({ 
+      menteeEmail: menteeEmail.toLowerCase(),
+      isArchived: true
+    });
 
     // Access control
     const role  = req.userRole;
@@ -274,7 +361,9 @@ app.post('/api/files/secure-url', requireRole('mentee', 'mentor', 'hod', 'projec
     }
 
     if (role === 'mentor') {
-      if (!assignment || assignment.mentorEmail !== email) {
+      // Check if mentor is assigned to either active or archived assignment
+      const isAssignedMentor = (activeAssignment?.mentorEmail === email) || (archivedAssignment?.mentorEmail === email);
+      if (!isAssignedMentor) {
         return res.status(403).json({ success: false, message: 'You are not the assigned mentor for this mentee' });
       }
     }
@@ -308,20 +397,32 @@ app.post('/api/files/secure-url', requireRole('mentee', 'mentor', 'hod', 'projec
  */
 app.get('/api/files/metadata/:menteeEmail', requireRole('mentee', 'mentor', 'hod', 'project_coordinator'), async (req, res) => {
   const menteeEmail = req.params.menteeEmail.toLowerCase();
+  const { projectName } = req.query; // Optional: filter archived files by specific project
 
   try {
-    const assignment = await db.collection('assignments').findOne({ 
+    // Check for both active and archived assignments for access control
+    const activeAssignment = await db.collection('assignments').findOne({ 
       menteeEmail,
-      isArchived: { $ne: true } // Get active assignment only
+      isArchived: { $ne: true }
     });
+    const archivedAssignments = await db.collection('assignments').find({ 
+      menteeEmail,
+      isArchived: true
+    }).toArray();
+    
     const role  = req.userRole;
     const email = req.userEmail;
 
     if (role === 'mentee' && email !== menteeEmail) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
-    if (role === 'mentor' && (!assignment || assignment.mentorEmail !== email)) {
-      return res.status(403).json({ success: false, message: 'You are not the assigned mentor for this mentee' });
+    if (role === 'mentor') {
+      // Check if mentor is assigned to either active or any archived assignment
+      const isAssignedMentor = (activeAssignment?.mentorEmail === email) || 
+        archivedAssignments.some(a => a.mentorEmail === email);
+      if (!isAssignedMentor) {
+        return res.status(403).json({ success: false, message: 'You are not the assigned mentor for this mentee' });
+      }
     }
 
     // Get active (non-archived) files
@@ -330,18 +431,28 @@ app.get('/api/files/metadata/:menteeEmail', requireRole('mentee', 'mentor', 'hod
       isArchived: { $ne: true }
     }).toArray();
     
-    // Get archived files (from previous projects) - view only
-    const archivedFiles = await db.collection(FILE_COL).find({ 
+    // Get archived files (from previous projects)
+    // If projectName is provided, filter by that specific project
+    const archivedQuery = { 
       uploaded_by: menteeEmail,
       isArchived: true
-    }).toArray();
+    };
+    if (projectName) {
+      archivedQuery.archivedProjectName = projectName;
+    }
+    
+    const archivedFiles = await db.collection(FILE_COL).find(archivedQuery)
+      .sort({ archivedAt: -1, archivedProjectName: 1, section: 1 })
+      .toArray();
+    
+    console.log(`[FILES] Found ${activeFiles.length} active files and ${archivedFiles.length} archived files for ${menteeEmail}${projectName ? ` (project: ${projectName})` : ''}`);
     
     res.json({
       success: true,
       data: activeFiles,
       archivedFiles: archivedFiles, // Separate array for archived files
-      deadline: assignment?.deadline || null,
-      extendedDeadline: assignment?.extendedDeadline || null,
+      deadline: activeAssignment?.deadline || null,
+      extendedDeadline: activeAssignment?.extendedDeadline || null,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to fetch metadata' });
@@ -399,7 +510,10 @@ app.patch('/api/files/remark', requireRole('mentor'), async (req, res) => {
   }
 
   try {
-    const assignment = await db.collection('assignments').findOne({ menteeEmail: menteeEmail.toLowerCase() });
+    const assignment = await db.collection('assignments').findOne({ 
+      menteeEmail: menteeEmail.toLowerCase(),
+      isArchived: { $ne: true } // Only check active assignments
+    });
     if (!assignment || assignment.mentorEmail !== req.userEmail) {
       return res.status(403).json({ success: false, message: 'You are not the assigned mentor for this mentee' });
     }
@@ -410,7 +524,11 @@ app.patch('/api/files/remark', requireRole('mentor'), async (req, res) => {
     }
 
     const result = await db.collection(FILE_COL).updateOne(
-      { uploaded_by: menteeEmail.toLowerCase(), section },
+      { 
+        uploaded_by: menteeEmail.toLowerCase(), 
+        section,
+        isArchived: { $ne: true } // Only update active files
+      },
       { $set: { remark, updatedAt: new Date() } }
     );
 
@@ -492,12 +610,27 @@ app.post('/api/files/upload', verifyToken, uploadToMemory.single('file'), async 
 /*************** USER ROUTES ***************/
 
 // Signup
-app.post("/api/signup", async (req, res) => {
+// Signup with rate limiting and password validation
+app.post("/api/signup", authLimiter, async (req, res) => {
     try {
         const { name, email, password, role, rollNo, contactNo, inviteCode } = req.body;
 
         if (!name?.trim() || !email || !password || !role) {
             return res.status(400).json({ success: false, message: "name, email, password and role are required" });
+        }
+
+        // Validate email format
+        const { validateEmail, validatePassword } = require('./middleware/validation');
+        if (!validateEmail(email)) {
+            return res.status(400).json({ success: false, message: "Invalid email format" });
+        }
+
+        // Validate password strength
+        if (!validatePassword(password)) {
+            return res.status(400).json({ 
+                success: false, 
+                message: "Password must be at least 8 characters with 1 uppercase, 1 lowercase, and 1 number" 
+            });
         }
 
         // ── Role access control ──────────────────────────────────────────────
@@ -542,11 +675,18 @@ app.post("/api/signup", async (req, res) => {
         const existingUser    = await usersCollection.findOne({ email: normalizedEmail });
         const hashedPassword  = await bcrypt.hash(password, 10);
 
+        // Generate verification token
+        const verificationToken = crypto.randomBytes(32).toString('hex');
+
         // ── Mentee: single-role, one account per email ───────────────────────
         if (role === 'mentee') {
             if (existingUser) {
                 return res.status(400).json({ success: false, message: "User already exists" });
             }
+            
+            console.log('[Signup] Creating mentee account:', normalizedEmail);
+            console.log('[Signup] Verification token:', verificationToken);
+            
             await usersCollection.insertOne({
                 name: name.trim(),
                 email: normalizedEmail,
@@ -556,8 +696,34 @@ app.post("/api/signup", async (req, res) => {
                 rollNo: rollNo?.trim() || '',
                 contactNo: contactNo?.toString().trim() || '',
                 projectStatus: 'pending',
+                isVerified: false,
+                verificationToken,
+                createdAt: new Date(),
             });
-            return res.status(201).json({ success: true, message: "Account created successfully. You can now log in." });
+
+            // Send verification email
+            const verificationLink = `${process.env.FRONTEND_URL}/verify/${verificationToken}`;
+            console.log('[Signup] Verification link:', verificationLink);
+            
+            const { emailVerificationEmail } = require('./utils/emailService');
+            setImmediate(async () => {
+                try {
+                    const emailTemplate = emailVerificationEmail({ 
+                        name: name.trim(), 
+                        verificationLink 
+                    });
+                    await sendEmail({ to: normalizedEmail, ...emailTemplate });
+                    console.log('[Signup] Verification email sent to:', normalizedEmail);
+                } catch (e) {
+                    console.error('[Email] Verification email failed:', e.message);
+                }
+            });
+
+            return res.status(201).json({ 
+                success: true, 
+                message: "Account created! Please check your email to verify your account.",
+                requiresVerification: true
+            });
         }
 
         // ── Mentor: multi-role merge on same email ───────────────────────────
@@ -587,13 +753,15 @@ app.post("/api/signup", async (req, res) => {
             });
         }
 
-        // New account (mentor / coordinator / hod)
+        // New account (mentor / coordinator / hod) - auto-verified for non-mentee roles
         await usersCollection.insertOne({
             name: name.trim(),
             email: normalizedEmail,
             password: hashedPassword,
             role,
             roles: [role],
+            isVerified: true, // Auto-verify for staff roles
+            createdAt: new Date(),
         });
         res.status(201).json({ success: true, message: "Account created successfully. You can now log in." });
 
@@ -697,19 +865,19 @@ app.post("/api/mentee/create-project", requireRole('mentee'), async (req, res) =
             });
         }
         
-        // Count completed 6-month projects in current batch
-        const completed6MonthProjects = allProjectsInBatch.filter(p => 
-            p.duration === '6_months' && p.isCompleted
+        // Count ALL 6-month projects in current batch (both completed and active)
+        const total6MonthProjects = allProjectsInBatch.filter(p => 
+            p.duration === '6_months'
         ).length;
         
-        console.log('[CREATE PROJECT] Completed 6-month projects in current batch:', completed6MonthProjects);
+        console.log('[CREATE PROJECT] Total 6-month projects in current batch:', total6MonthProjects);
         
-        // Check if already has 2 completed 6-month projects
-        if (completed6MonthProjects >= 2) {
-            console.log('[CREATE PROJECT] Already has 2 completed 6-month projects in this batch - BLOCKED');
+        // Check if already has 2 six-month projects (regardless of completion status)
+        if (total6MonthProjects >= 2) {
+            console.log('[CREATE PROJECT] Already has 2 six-month projects in this batch - BLOCKED');
             return res.status(400).json({ 
                 success: false, 
-                message: "You have already completed 2 projects in this academic year. Maximum 2 projects (6-months each) allowed per year." 
+                message: "You have already created 2 projects in this academic year. Maximum 2 projects (6-months each) allowed per year." 
             });
         }
         
@@ -759,12 +927,18 @@ app.post("/api/mentee/create-project", requireRole('mentee'), async (req, res) =
             console.log('[CREATE PROJECT] Marking old project data as archived (keeping for view-only access)...');
             
             // Mark old assignment as archived (keep in assignments collection for viewing)
-            const oldAssignment = await db.collection('assignments').findOne({ menteeEmail: req.userEmail });
+            const oldAssignment = await db.collection('assignments').findOne({ 
+                menteeEmail: req.userEmail,
+                isArchived: { $ne: true } // Only find active assignments
+            });
             if (oldAssignment) {
                 console.log('[CREATE PROJECT] Found old assignment:', oldAssignment._id);
                 // Mark as archived instead of deleting
-                await db.collection('assignments').updateOne(
-                    { menteeEmail: req.userEmail },
+                await db.collection('assignments').updateMany(
+                    { 
+                        menteeEmail: req.userEmail,
+                        isArchived: { $ne: true } // Only archive active assignments
+                    },
                     { 
                         $set: { 
                             isArchived: true, 
@@ -773,18 +947,24 @@ app.post("/api/mentee/create-project", requireRole('mentee'), async (req, res) =
                         } 
                     }
                 );
-                console.log('[CREATE PROJECT] Old assignment marked as archived');
+                console.log('[CREATE PROJECT] Old assignment(s) marked as archived');
             } else {
                 console.log('[CREATE PROJECT] No old assignment found');
             }
             
             // Mark old files as archived (keep for viewing)
-            const oldFiles = await db.collection(FILE_COL).find({ uploaded_by: req.userEmail }).toArray();
+            const oldFiles = await db.collection(FILE_COL).find({ 
+                uploaded_by: req.userEmail,
+                isArchived: { $ne: true } // Only find active files
+            }).toArray();
             console.log('[CREATE PROJECT] Found', oldFiles.length, 'old files');
             if (oldFiles.length > 0) {
                 // Mark all files as archived instead of deleting
                 const filesUpdateResult = await db.collection(FILE_COL).updateMany(
-                    { uploaded_by: req.userEmail },
+                    { 
+                        uploaded_by: req.userEmail,
+                        isArchived: { $ne: true } // Only archive active files
+                    },
                     { 
                         $set: { 
                             isArchived: true, 
@@ -797,11 +977,17 @@ app.post("/api/mentee/create-project", requireRole('mentee'), async (req, res) =
             }
             
             // Mark old project as archived (keep for viewing)
-            const oldProject = await projectsCollection.findOne({ menteeEmail: req.userEmail });
+            const oldProject = await projectsCollection.findOne({ 
+                menteeEmail: req.userEmail,
+                isArchived: { $ne: true } // Only find active projects
+            });
             if (oldProject) {
                 console.log('[CREATE PROJECT] Found old project:', oldProject._id);
-                await projectsCollection.updateOne(
-                    { menteeEmail: req.userEmail },
+                await projectsCollection.updateMany(
+                    { 
+                        menteeEmail: req.userEmail,
+                        isArchived: { $ne: true } // Only archive active projects
+                    },
                     { 
                         $set: { 
                             isArchived: true, 
@@ -809,7 +995,7 @@ app.post("/api/mentee/create-project", requireRole('mentee'), async (req, res) =
                         } 
                     }
                 );
-                console.log('[CREATE PROJECT] Old project marked as archived');
+                console.log('[CREATE PROJECT] Old project(s) marked as archived');
             } else {
                 console.log('[CREATE PROJECT] No old project found');
             }
@@ -839,26 +1025,46 @@ app.post("/api/mentee/create-project", requireRole('mentee'), async (req, res) =
         // Active batch already fetched above
         console.log('[CREATE PROJECT] Using active batch:', activeBatch.name);
         
-        // Also create/update in projects collection
-        await projectsCollection.updateOne(
-            { menteeEmail: req.userEmail },
-            {
-                $set: {
-                    menteeEmail: req.userEmail,
-                    menteeName: user.name,
-                    projectName: projectName.trim(),
-                    duration: projectDuration,
-                    description: description?.trim() || '',
-                    groupMembers: sanitizedMembers,
-                    status: 'pending',
-                    isCompleted: false, // Reset completion status
-                    batchId: activeBatch._id, // Assign to active academic year
-                    createdAt: new Date(),
-                    updatedAt: new Date(),
+        // Check if there's an existing active project
+        const existingActiveProject = await projectsCollection.findOne({
+            menteeEmail: req.userEmail,
+            isArchived: { $ne: true }
+        });
+        
+        if (existingActiveProject) {
+            // Update existing active project (e.g., editing project details before assignment)
+            console.log('[CREATE PROJECT] Updating existing active project');
+            await projectsCollection.updateOne(
+                { _id: existingActiveProject._id },
+                {
+                    $set: {
+                        projectName: projectName.trim(),
+                        duration: projectDuration,
+                        description: description?.trim() || '',
+                        groupMembers: sanitizedMembers,
+                        status: 'pending',
+                        updatedAt: new Date(),
+                    }
                 }
-            },
-            { upsert: true }
-        );
+            );
+        } else {
+            // Create NEW project document (after completing previous project)
+            console.log('[CREATE PROJECT] Creating new project document');
+            await projectsCollection.insertOne({
+                menteeEmail: req.userEmail,
+                menteeName: user.name,
+                projectName: projectName.trim(),
+                duration: projectDuration,
+                description: description?.trim() || '',
+                groupMembers: sanitizedMembers,
+                status: 'pending',
+                isCompleted: false,
+                isArchived: false,
+                batchId: activeBatch._id, // Assign to CURRENT active academic year
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            });
+        }
         
         console.log('[CREATE PROJECT] Projects collection updated');
         console.log('[CREATE PROJECT] Success!');
@@ -901,7 +1107,10 @@ app.put("/api/mentee/group-members", requireRole('mentee'), async (req, res) => 
         const user = await usersCollection.findOne({ email: req.userEmail });
         if (!user) return res.status(404).json({ success: false, message: "User not found" });
         // Block if project has been finalised
-        const assignment = await db.collection('assignments').findOne({ menteeEmail: req.userEmail });
+        const assignment = await db.collection('assignments').findOne({ 
+            menteeEmail: req.userEmail,
+            isArchived: { $ne: true } // Only check active assignments
+        });
         if (assignment?.finalRemark) {
             return res.status(403).json({ success: false, message: "Your project has been finalised. Group members cannot be modified." });
         }
@@ -980,7 +1189,45 @@ app.get("/api/mentee/status", requireRole('mentee'), async (req, res) => {
         
         // Check if current project is completed
         const isProjectCompleted = project?.isCompleted || assignment?.finalRemark || false;
-        const canCreateNewProject = !user.projectName || isProjectCompleted || user.projectStatus === 'rejected';
+        
+        // ADDED: Check project limits in current academic year
+        const activeBatch = await batchesCollection.findOne({ isActive: true });
+        let canCreateNewProject = !user.projectName || isProjectCompleted || user.projectStatus === 'rejected';
+        let projectLimitReason = null;
+        let completed6MonthCount = 0;
+        let has1YearCompleted = false;
+        
+        if (activeBatch && canCreateNewProject) {
+            // Get all projects in current batch (including archived ones)
+            const allProjectsInBatch = await projectsCollection.find({
+                menteeEmail: req.userEmail,
+                batchId: activeBatch._id
+            }).toArray();
+            
+            // Check if has completed 1-year project in this batch
+            has1YearCompleted = allProjectsInBatch.some(p => 
+                p.duration === '1_year' && p.isCompleted
+            );
+            
+            // Count ALL 6-month projects in this batch (both completed and active)
+            const total6MonthProjects = allProjectsInBatch.filter(p => 
+                p.duration === '6_months'
+            ).length;
+            
+            // For display purposes, also count completed ones
+            completed6MonthCount = allProjectsInBatch.filter(p => 
+                p.duration === '6_months' && p.isCompleted
+            ).length;
+            
+            // Block if already has 1-year project or 2 six-month projects (total, not just completed)
+            if (has1YearCompleted) {
+                canCreateNewProject = false;
+                projectLimitReason = '1_year_completed';
+            } else if (total6MonthProjects >= 2) {
+                canCreateNewProject = false;
+                projectLimitReason = 'max_6_month_reached';
+            }
+        }
         
         // Check for unread notifications
         const notifications = await db.collection("notifications")
@@ -1003,6 +1250,9 @@ app.get("/api/mentee/status", requireRole('mentee'), async (req, res) => {
                 duration: resolvedDuration, // ADDED
                 isProjectCompleted, // ADDED
                 canCreateNewProject, // ADDED
+                projectLimitReason, // ADDED: reason why can't create new project
+                completed6MonthCount, // ADDED: count of completed 6-month projects
+                has1YearCompleted, // ADDED: whether 1-year project is completed
                 notifications,
             }
         });
@@ -1024,8 +1274,8 @@ app.post("/api/notifications/read", requireRole('mentee', 'mentor'), async (req,
     }
 });
 
-// Login
-app.post("/api/login", async (req, res) => {
+// Login with rate limiting
+app.post("/api/login", authLimiter, async (req, res) => {
     const { email, password, role } = req.body;
     const normalizedEmail = email.toLowerCase();
 
@@ -1042,6 +1292,16 @@ app.post("/api/login", async (req, res) => {
         }
         if (!passwordValid) return res.status(400).json({ success: false, message: "Invalid password" });
 
+        // Check email verification for mentees
+        console.log('[Login] User:', user.email, 'Role:', user.role, 'isVerified:', user.isVerified);
+        if (user.role === 'mentee' && user.isVerified === false) {
+            return res.status(403).json({ 
+                success: false, 
+                message: "Please verify your email before logging in. Check your inbox for the verification link.",
+                requiresVerification: true
+            });
+        }
+
         // Build effective roles array (support both old `role` string and new `roles` array)
         const effectiveRoles = user.roles?.length ? user.roles : [user.role];
 
@@ -1056,6 +1316,54 @@ app.post("/api/login", async (req, res) => {
         res.json({ success: true, token, role: resolvedRole, roles: effectiveRoles, name: user.name || '', email: user.email, userId: user._id });
     } catch (err) {
         console.error("Login error:", err);
+        res.status(500).json({ success: false, message: "Server error" });
+    }
+});
+
+/*************** EMAIL VERIFICATION ***************/
+
+// GET /api/verify/:token — verify email address
+app.get("/api/verify/:token", async (req, res) => {
+    const { token } = req.params;
+
+    try {
+        console.log('[Verify] Received token:', token);
+        const user = await usersCollection.findOne({ verificationToken: token });
+        console.log('[Verify] User found:', user ? `${user.email} (isVerified: ${user.isVerified})` : 'null');
+
+        if (!user) {
+            // Check if user exists but is already verified (token was removed)
+            // This can happen if the link is clicked twice
+            return res.status(400).json({ 
+                success: false, 
+                message: "Invalid or expired verification link. If you already verified, please try logging in." 
+            });
+        }
+
+        if (user.isVerified) {
+            return res.status(200).json({ 
+                success: true, 
+                message: "Email already verified. You can now log in.",
+                alreadyVerified: true
+            });
+        }
+
+        // Verify the user
+        await usersCollection.updateOne(
+            { _id: user._id },
+            { 
+                $set: { isVerified: true },
+                $unset: { verificationToken: "" }
+            }
+        );
+
+        console.log('[Verify] Successfully verified:', user.email);
+        res.json({ 
+            success: true, 
+            message: "Email verified successfully! You can now log in." 
+        });
+    } catch (err) {
+        console.error("Verification error:", err);
         res.status(500).json({ success: false, message: "Server error" });
     }
 });
@@ -1275,7 +1583,7 @@ app.get("/api/mentors", verifyToken, checkRole('project_coordinator', 'hod'), as
 app.get("/api/mentees", verifyToken, checkRole('project_coordinator', 'hod'), async (req, res) => {
     try {
         const mentees = await usersCollection.find({ $or: [{ role: "mentee" }, { roles: "mentee" }] })
-            .project({ email: 1, name: 1, rollNo: 1, contactNo: 1, projectName: 1, projectStatus: 1, groupMembers: 1 }).toArray();
+            .project({ email: 1, name: 1, rollNo: 1, contactNo: 1, projectName: 1, projectDuration: 1, projectStatus: 1, groupMembers: 1 }).toArray();
         res.json({ success: true, data: mentees });
     } catch (err) {
         res.status(500).json({ success: false, message: "Failed to fetch mentees" });
@@ -1513,14 +1821,32 @@ app.get("/api/hod/project-details", verifyToken, checkRole('hod', 'project_coord
             assignments.map(async (a) => {
                 const mentor  = await usersCollection.findOne({ email: a.mentorEmail });
                 const mentee  = await usersCollection.findOne({ email: a.menteeEmail });
-                const project = await projectsCollection.findOne({ menteeEmail: a.menteeEmail });
+                
+                // Find the project that matches this assignment
+                // If assignment is archived, find archived project with matching name
+                // If assignment is active, find active project
+                let project;
+                if (a.isArchived) {
+                    project = await projectsCollection.findOne({ 
+                        menteeEmail: a.menteeEmail,
+                        projectName: a.projectName,
+                        isArchived: true
+                    });
+                } else {
+                    project = await projectsCollection.findOne({ 
+                        menteeEmail: a.menteeEmail,
+                        isArchived: { $ne: true }
+                    });
+                }
+                
                 // duration: project doc is most up-to-date, fall back to assignment doc
                 const duration = project?.duration || a.duration || '6_months';
                 return {
                     _id: a._id,
                     projectName: a.projectName,
                     duration,
-                    batchId: project?.batchId || null, // ADDED: Include batchId from project
+                    batchId: project?.batchId || null,
+                    isArchived: a.isArchived || false, // ADDED: Include archived status
                     mentor: mentor ? { email: mentor.email, name: mentor.name || '' } : { email: a.mentorEmail, name: '' },
                     mentee: mentee ? { email: mentee.email, name: mentee.name || '', rollNo: mentee.rollNo || '', contactNo: mentee.contactNo || '' } : { email: a.menteeEmail, name: '', rollNo: '', contactNo: '' },
                     groupMembers: mentee?.groupMembers || [],
@@ -1616,6 +1942,7 @@ app.post("/api/assignments", verifyToken, checkRole('project_coordinator'), asyn
             mentorEmail: mentorEmail.toLowerCase(),
             assignedBy: assignedBy.toLowerCase(),
             duration, // ADDED
+            isArchived: false, // Explicitly set as not archived
             createdAt: new Date(),
             updatedAt: new Date(),
         });
@@ -1627,9 +1954,32 @@ app.post("/api/assignments", verifyToken, checkRole('project_coordinator'), asyn
         );
 
         // ADDED: upsert project doc with duration so phase validation works
+        // Get current active batch to ensure project is in correct academic year
+        const activeBatch = await db.collection('batches').findOne({ isActive: true });
+        if (!activeBatch) {
+            return res.status(400).json({ success: false, message: "No active academic year found. Please set one first." });
+        }
+        
         await projectsCollection.updateOne(
-            { menteeEmail: menteeEmail.toLowerCase() },
-            { $set: { projectName, mentorEmail: mentorEmail.toLowerCase(), duration, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+            { 
+                menteeEmail: menteeEmail.toLowerCase(),
+                isArchived: { $ne: true } // Only update active project
+            },
+            { 
+                $set: { 
+                    projectName, 
+                    mentorEmail: mentorEmail.toLowerCase(), 
+                    duration, 
+                    batchId: activeBatch._id, // Ensure project is in current active academic year
+                    updatedAt: new Date() 
+                }, 
+                $setOnInsert: { 
+                    createdAt: new Date(), 
+                    isArchived: false,
+                    menteeEmail: menteeEmail.toLowerCase(),
+                    menteeName: mentee.name || menteeEmail
+                } 
+            },
             { upsert: true }
         );
 
@@ -1700,7 +2050,10 @@ app.post("/api/assignments/bulk-csv", verifyToken, checkRole('project_coordinato
             const projectName = mentee.projectName || '';
             if (!projectName) { results.push({ menteeEmail, mentorEmail, duration, status: 'error', reason: 'Mentee has no project name set — ask them to set it first' }); continue; }
 
-            const existing = await db.collection('assignments').findOne({ menteeEmail });
+            const existing = await db.collection('assignments').findOne({ 
+                menteeEmail,
+                isArchived: { $ne: true } // Only check active assignments
+            });
             if (existing) { results.push({ menteeEmail, mentorEmail, duration, status: 'skipped', reason: 'Already assigned' }); continue; }
 
             if (mentee.projectStatus === 'rejected') {
@@ -1717,14 +2070,39 @@ app.post("/api/assignments/bulk-csv", verifyToken, checkRole('project_coordinato
                 mentorEmail,
                 assignedBy,
                 duration, // ADDED
+                isArchived: false, // Explicitly set as not archived
                 createdAt: new Date(),
                 updatedAt: new Date(),
             });
 
             // Upsert project doc so phase validation works
+            // Get current active batch to ensure project is in correct academic year
+            const activeBatch = await db.collection('batches').findOne({ isActive: true });
+            if (!activeBatch) {
+                results.push({ menteeEmail, mentorEmail, duration, status: 'error', reason: 'No active academic year found' });
+                continue;
+            }
+            
             await projectsCollection.updateOne(
-                { menteeEmail },
-                { $set: { projectName, mentorEmail, duration, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+                { 
+                    menteeEmail,
+                    isArchived: { $ne: true } // Only update active project
+                },
+                { 
+                    $set: { 
+                        projectName, 
+                        mentorEmail, 
+                        duration, 
+                        batchId: activeBatch._id, // Ensure project is in current active academic year
+                        updatedAt: new Date() 
+                    }, 
+                    $setOnInsert: { 
+                        createdAt: new Date(), 
+                        isArchived: false,
+                        menteeEmail,
+                        menteeName: mentee.name || menteeEmail
+                    } 
+                },
                 { upsert: true }
             );
 
@@ -1785,21 +2163,46 @@ app.get("/api/assignments/mentee/:email", verifyToken, checkRole('mentee', 'proj
 // GET /api/assignments/mentor/:email — get all mentees assigned to a mentor
 app.get("/api/assignments/mentor/:email", verifyToken, checkRole('mentor', 'project_coordinator', 'hod'), async (req, res) => {
     try {
-        // Only return active (non-archived) assignments
+        // Get active academic year
+        const activeBatch = await db.collection('batches').findOne({ isActive: true });
+        if (!activeBatch) {
+            return res.json({ success: true, data: [] }); // No active batch, return empty
+        }
+        
+        // Return ALL assignments (both active and archived) for this mentor
         const assignments = await db.collection("assignments").find({ 
-            mentorEmail: req.params.email.toLowerCase(),
-            isArchived: { $ne: true }
-        }).toArray();
-        // Enrich each assignment with groupMembers + duration
+            mentorEmail: req.params.email.toLowerCase()
+        })
+        .sort({ isArchived: 1, updatedAt: -1 }) // Active first, then by most recent
+        .toArray();
+        
+        // Enrich each assignment and filter by active academic year
         const enriched = await Promise.all(assignments.map(async (a) => {
             const mentee = await usersCollection.findOne({ email: a.menteeEmail });
-            const project = await projectsCollection.findOne({ menteeEmail: a.menteeEmail });
+            // For archived assignments, look for archived project; for active, look for active project
+            const project = await projectsCollection.findOne({ 
+                menteeEmail: a.menteeEmail,
+                isArchived: a.isArchived ? true : { $ne: true }
+            });
             // duration: prefer project doc (most up-to-date), fall back to assignment doc
             const duration = project?.duration || a.duration || '6_months';
-            return { ...a, duration, groupMembers: mentee?.groupMembers || [], menteeName: mentee?.name || '' };
+            return { 
+                ...a, 
+                duration, 
+                groupMembers: mentee?.groupMembers || [], 
+                menteeName: mentee?.name || '',
+                batchId: project?.batchId // Include batchId for filtering
+            };
         }));
-        res.json({ success: true, data: enriched });
+        
+        // Filter to only show projects from the active academic year
+        const filtered = enriched.filter(a => 
+            a.batchId && a.batchId.toString() === activeBatch._id.toString()
+        );
+        
+        res.json({ success: true, data: filtered });
     } catch (err) {
+        console.error('Mentor assignments error:', err);
         res.status(500).json({ success: false, message: "Server error" });
     }
 });
@@ -1818,8 +2221,11 @@ app.patch("/api/assignments/:id/final-remark", requireRole('mentor'), async (req
       return res.status(403).json({ success: false, message: 'You are not the assigned mentor' });
     }
 
-    // Verify all uploaded files have a non-pending remark
-    const files = await db.collection(FILE_COL).find({ uploaded_by: assignment.menteeEmail }).toArray();
+    // Verify all uploaded files have a non-pending remark (only check active files)
+    const files = await db.collection(FILE_COL).find({ 
+        uploaded_by: assignment.menteeEmail,
+        isArchived: { $ne: true } // Only check active files
+    }).toArray();
     const allRemarked = files.length > 0 && files.every(f => f.remark && f.remark !== 'Pending Review');
     if (!allRemarked) {
       return res.status(400).json({ success: false, message: 'All uploaded files must be reviewed before marking as done' });
@@ -2052,10 +2458,13 @@ app.put("/api/assignments/:id", verifyToken, checkRole('project_coordinator'), a
             if (projectName) projectUpdateFields.projectName = projectName;
             
             await projectsCollection.updateOne(
-                { menteeEmail: oldAssignment.menteeEmail },
+                { 
+                    menteeEmail: oldAssignment.menteeEmail,
+                    isArchived: { $ne: true } // Only update active project
+                },
                 {
                     $set: projectUpdateFields,
-                    $setOnInsert: { menteeEmail: oldAssignment.menteeEmail, createdAt: new Date() },
+                    $setOnInsert: { menteeEmail: oldAssignment.menteeEmail, createdAt: new Date(), isArchived: false },
                 },
                 { upsert: true }
             );
@@ -2209,17 +2618,35 @@ app.get("/api/dashboard/mentor/:email", requireRole('mentor'), async (req, res) 
     const email = req.params.email.toLowerCase();
     if (req.userEmail !== email) return res.status(403).json({ success: false, message: "Access denied" });
     try {
-        // Only get active (non-archived) assignments
-        const assignments = await db.collection("assignments").find({ 
-            mentorEmail: email,
-            isArchived: { $ne: true }
+        // Get active academic year
+        const activeBatch = await db.collection('batches').findOne({ isActive: true });
+        if (!activeBatch) {
+            return res.json({ success: true, data: { stats: { totalAssigned: 0, totalPendingReview: 0, totalLate: 0, totalAccepted: 0, currentProjects: 0, completedProjects: 0 }, mentees: [] } });
+        }
+        
+        // Get ALL assignments for this mentor (both active and archived)
+        const allAssignments = await db.collection("assignments").find({ 
+            mentorEmail: email
         }).toArray();
+        
+        // Filter assignments to only those from active academic year
+        const assignmentsWithProjects = await Promise.all(allAssignments.map(async (a) => {
+            const project = await projectsCollection.findOne({ 
+                menteeEmail: a.menteeEmail,
+                isArchived: a.isArchived ? true : { $ne: true }
+            });
+            return { ...a, batchId: project?.batchId };
+        }));
+        
+        const assignments = assignmentsWithProjects.filter(a => 
+            a.batchId && a.batchId.toString() === activeBatch._id.toString()
+        );
 
         const menteeData = await Promise.all(assignments.map(async (a) => {
-            // Only get active (non-archived) files for current project
+            // Get files based on whether assignment is archived
             const files = await db.collection(FILE_COL).find({ 
                 uploaded_by: a.menteeEmail,
-                isArchived: { $ne: true }
+                isArchived: a.isArchived ? true : { $ne: true }
             }).toArray();
             const menteeUser = await usersCollection.findOne({ email: a.menteeEmail });
             const submitted = files.length;
@@ -2233,6 +2660,7 @@ app.get("/api/dashboard/mentor/:email", requireRole('mentor'), async (req, res) 
                 deadline: a.deadline || null,
                 extendedDeadline: a.extendedDeadline || null,
                 finalRemark: a.finalRemark || null,
+                isArchived: a.isArchived || false,
                 stats: { submitted, lateCount, pendingReview },
             };
         }));
@@ -2241,15 +2669,27 @@ app.get("/api/dashboard/mentor/:email", requireRole('mentor'), async (req, res) 
         const totalPendingReview = menteeData.reduce((s, m) => s + m.stats.pendingReview, 0);
         const totalLate = menteeData.reduce((s, m) => s + m.stats.lateCount, 0);
         const totalAccepted = assignments.filter(a => a.finalRemark).length;
+        
+        // Calculate current vs completed projects
+        const currentProjects = assignments.filter(a => !a.finalRemark && !a.isArchived).length;
+        const completedProjects = assignments.filter(a => a.finalRemark || a.isArchived).length;
 
         res.json({
             success: true,
             data: {
-                stats: { totalAssigned, totalPendingReview, totalLate, totalAccepted },
+                stats: { 
+                    totalAssigned, 
+                    totalPendingReview, 
+                    totalLate, 
+                    totalAccepted,
+                    currentProjects,
+                    completedProjects
+                },
                 mentees: menteeData,
             }
         });
     } catch (err) {
+        console.error('Mentor dashboard error:', err);
         res.status(500).json({ success: false, message: "Server error" });
     }
 });
@@ -2314,7 +2754,34 @@ app.get("/api/dashboard/coordinator", verifyToken, checkRole('project_coordinato
     }
 });
 
-// Start Server
+// ═══════════════════════════════════════════════════════════════════════════
+// ERROR HANDLING MIDDLEWARE (Must be last)
+// ═══════════════════════════════════════════════════════════════════════════
+app.use(errorHandler);
+
+// Handle 404 routes
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: 'Route not found' });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// START SERVER
+// ═══════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
     console.log(`🚀 Server running at http://localhost:${PORT}`);
+    console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🔒 CORS Origin: ${process.env.CORS_ORIGIN || 'http://localhost:5173'}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing server gracefully...');
+  await client.close();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT received, closing server gracefully...');
+  await client.close();
+  process.exit(0);
 });

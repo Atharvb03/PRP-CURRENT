@@ -60,6 +60,8 @@ export default function MenteeDashboard() {
   const [projectFinalRemark, setProjectFinalRemark] = useState(null);
   // ADDED: track if mentee can create new project
   const [canCreateNewProject, setCanCreateNewProject] = useState(true);
+  const [projectLimitReason, setProjectLimitReason] = useState(null);
+  const [completed6MonthCount, setCompleted6MonthCount] = useState(0);
   // ADDED: archived files from previous projects
   const [archivedFiles, setArchivedFiles] = useState([]);
   const [showArchivedFiles, setShowArchivedFiles] = useState(false);
@@ -154,9 +156,16 @@ export default function MenteeDashboard() {
       // ADDED: set project duration to drive phase rendering
       if (d.duration) setProjectDuration(d.duration);
       // ADDED: lock uploads if project is finalised
-      if (d.assignment?.finalRemark) setProjectFinalRemark(d.assignment.finalRemark);
+      // Only set finalRemark if assignment exists and is not archived
+      if (d.assignment?.finalRemark && !d.assignment?.isArchived) {
+        setProjectFinalRemark(d.assignment.finalRemark);
+      } else {
+        setProjectFinalRemark(null); // Clear finalRemark for new projects
+      }
       // ADDED: check if mentee can create new project
       setCanCreateNewProject(d.canCreateNewProject !== false);
+      setProjectLimitReason(d.projectLimitReason || null);
+      setCompleted6MonthCount(d.completed6MonthCount || 0);
       
       // Fetch files after we know project exists
       if (d.projectName) {
@@ -324,7 +333,17 @@ export default function MenteeDashboard() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [menteeEmail, userRole]); // eslint-disable-line
 
-  const isActive = (key) => PHASE_CONFIG[key].required.every(r => uploads[r]);
+  const isActive = (key) => {
+    // Special handling for achievements: unlock after all previous phases are uploaded
+    if (key === 'achievements') {
+      // Get all phases except achievements
+      const phasesBeforeAchievements = sectionKeys.filter(k => k !== 'achievements');
+      // Check if all previous phases are uploaded
+      return phasesBeforeAchievements.every(k => uploads[k]);
+    }
+    // For other phases, check if all required phases are uploaded
+    return PHASE_CONFIG[key].required.every(r => uploads[r]);
+  };
 
   const handleUpload = async (e, key) => {
     const file = e.target.files[0];
@@ -427,6 +446,11 @@ export default function MenteeDashboard() {
 
     } catch (err) {
       console.error('Upload error:', err);
+      console.error('Error details:', {
+        status: err.response?.status,
+        message: err.response?.data?.message,
+        url: err.config?.url
+      });
       showToast(`❌ ${err.response?.data?.message || err.message || 'Upload failed.'}`, 'error');
     } finally {
       setUploading('');
@@ -878,10 +902,22 @@ export default function MenteeDashboard() {
                       {!canCreateNewProject && projectName && (
                         <div className="mb-4 p-4 rounded-xl" style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)' }}>
                           <p className="text-sm font-medium" style={{ color: '#f59e0b' }}>
-                            ⚠️ Complete your current project to create a new one
+                            {projectLimitReason === '1_year_completed' ? (
+                              '🚫 Project Limit Reached'
+                            ) : projectLimitReason === 'max_6_month_reached' ? (
+                              '🚫 Maximum Projects Reached'
+                            ) : (
+                              '⚠️ Complete your current project to create a new one'
+                            )}
                           </p>
                           <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-                            Your mentor must submit a final remark before you can start a new project.
+                            {projectLimitReason === '1_year_completed' ? (
+                              'You have completed a 1-year project this academic year. No additional projects allowed until next year.'
+                            ) : projectLimitReason === 'max_6_month_reached' ? (
+                              'You have already created 2 projects (6-months each) this academic year. Maximum 2 projects allowed per year.'
+                            ) : (
+                              'Your mentor must submit a final remark before you can start a new project.'
+                            )}
                           </p>
                         </div>
                       )}
@@ -899,6 +935,8 @@ export default function MenteeDashboard() {
                             Creating Project...
                           </>
                         ) : !canCreateNewProject ? (
+                          projectLimitReason === '1_year_completed' ? '🚫 1-Year Project Completed' :
+                          projectLimitReason === 'max_6_month_reached' ? '🚫 Maximum Projects Reached' :
                           '🔒 Complete Current Project First'
                         ) : (
                           'Create Project'
@@ -1291,7 +1329,7 @@ export default function MenteeDashboard() {
                 <div className="glass rounded-2xl overflow-hidden" style={{ border: '1px solid rgba(236,72,153,0.12)' }}>
                   <div className="px-5 py-3" style={{ borderBottom: '1px solid rgba(236,72,153,0.1)', background: 'rgba(236,72,153,0.04)' }}>
                     <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
-                      Archived Submissions ({archivedFiles.length} files)
+                      Archived Submissions ({archivedFiles.length} files from {new Set(archivedFiles.map(f => f.archivedProjectName)).size} project(s))
                     </p>
                   </div>
                   <div className="overflow-x-auto">
@@ -1307,48 +1345,56 @@ export default function MenteeDashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {archivedFiles.map((file, idx) => (
-                          <tr key={idx} style={{ borderBottom: idx < archivedFiles.length - 1 ? '1px solid rgba(236,72,153,0.06)' : 'none' }}>
-                            <td className="px-4 py-2.5 font-medium" style={{ color: 'var(--text-secondary)' }}>
-                              {file.archivedProjectName || 'Previous Project'}
-                            </td>
-                            <td className="px-4 py-2.5 capitalize" style={{ color: 'var(--text-primary)' }}>
-                              {file.section?.replace(/([A-Z])/g, ' $1').trim()}
-                            </td>
-                            <td className="px-4 py-2.5" style={{ color: 'var(--text-secondary)' }}>
-                              {file.file_name}
-                            </td>
-                            <td className="px-4 py-2.5" style={{ color: 'var(--text-muted)' }}>
-                              {file.submittedAt ? new Date(file.submittedAt).toLocaleDateString() : '—'}
-                            </td>
-                            <td className="px-4 py-2.5" style={{ 
-                              color: file.remark === 'Pending Review' ? '#f59e0b' : 
-                                     file.remark?.toLowerCase().includes('approved') ? '#10b981' : 
-                                     'var(--text-secondary)' 
+                        {archivedFiles.map((file, idx) => {
+                          // Check if this is the first file of a new project
+                          const isNewProject = idx === 0 || archivedFiles[idx - 1].archivedProjectName !== file.archivedProjectName;
+                          return (
+                            <tr key={idx} style={{ 
+                              borderBottom: idx < archivedFiles.length - 1 ? '1px solid rgba(236,72,153,0.06)' : 'none',
+                              borderTop: isNewProject && idx > 0 ? '2px solid rgba(236,72,153,0.15)' : 'none'
                             }}>
-                              {file.remark || '—'}
-                            </td>
-                            <td className="px-4 py-2.5">
-                              <button
-                                onClick={async (e) => {
-                                  e.stopPropagation();
-                                  try {
-                                    const res = await axios.post(`${API}/files/secure-url`, {
-                                      s3Key: file.file_url,
-                                      menteeEmail,
-                                    });
-                                    if (res.data.success) window.open(res.data.url, '_blank');
-                                    else showToast('❌ Could not generate secure link.', 'error');
-                                  } catch { showToast('❌ Failed to get secure URL.', 'error'); }
-                                }}
-                                className="px-3 py-1 rounded-lg text-xs font-medium transition-all hover:scale-105"
-                                style={{ background: 'rgba(99,102,241,0.1)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.2)' }}
-                              >
-                                👁️ View
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
+                              <td className="px-4 py-2.5 font-medium" style={{ color: 'var(--text-secondary)' }}>
+                                {file.archivedProjectName || 'Previous Project'}
+                              </td>
+                              <td className="px-4 py-2.5 capitalize" style={{ color: 'var(--text-primary)' }}>
+                                {PHASE_CONFIG[file.section]?.label || file.section?.replace(/([A-Z])/g, ' $1').trim()}
+                              </td>
+                              <td className="px-4 py-2.5" style={{ color: 'var(--text-secondary)' }}>
+                                {file.file_name}
+                              </td>
+                              <td className="px-4 py-2.5" style={{ color: 'var(--text-muted)' }}>
+                                {file.submittedAt ? new Date(file.submittedAt).toLocaleDateString() : '—'}
+                              </td>
+                              <td className="px-4 py-2.5" style={{ 
+                                color: file.remark === 'Pending Review' ? '#f59e0b' : 
+                                       file.remark?.toLowerCase().includes('approved') ? '#10b981' : 
+                                       file.remark?.toLowerCase().includes('reject') ? '#ef4444' :
+                                       'var(--text-secondary)' 
+                              }}>
+                                {file.remark || '—'}
+                              </td>
+                              <td className="px-4 py-2.5">
+                                <button
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    try {
+                                      const res = await axios.post(`${API}/files/secure-url`, {
+                                        s3Key: file.file_url,
+                                        menteeEmail,
+                                      });
+                                      if (res.data.success) window.open(res.data.url, '_blank');
+                                      else showToast('❌ Could not generate secure link.', 'error');
+                                    } catch { showToast('❌ Failed to get secure URL.', 'error'); }
+                                  }}
+                                  className="px-3 py-1 rounded-lg text-xs font-medium transition-all hover:scale-105"
+                                  style={{ background: 'rgba(99,102,241,0.1)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.2)' }}
+                                >
+                                  👁️ View
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

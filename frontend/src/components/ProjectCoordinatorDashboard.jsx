@@ -35,7 +35,8 @@ function StatusBadge({ text }) {
 
 export default function ProjectCoordinatorDashboard() {
   const { dark, toggle } = useTheme();
-  const [tab, setTab] = useState('mentees'); // 'dashboard' | 'mentees' | 'assign' | 'bulk' | 'list' | 'update' | 'projects' | 'batches'
+  const [tab, setTab] = useState('mentees'); // Will be set dynamically based on batches
+  const [initialTabSet, setInitialTabSet] = useState(false); // Track if initial tab has been determined
   const [mentors, setMentors] = useState([]);
   const [mentees, setMentees] = useState([]);
   const [assignments, setAssignments] = useState([]);
@@ -84,7 +85,7 @@ export default function ProjectCoordinatorDashboard() {
     });
   };
 
-  const toggleProject = (projectId, menteeEmail) => {
+  const toggleProject = (projectId, menteeEmail, project) => {
     setExpandedProjects(prev => {
       const newSet = new Set(prev);
       if (newSet.has(projectId)) {
@@ -92,19 +93,34 @@ export default function ProjectCoordinatorDashboard() {
       } else {
         newSet.add(projectId);
         // Load files when expanding
-        if (menteeEmail) loadMenteeFiles(menteeEmail);
+        if (menteeEmail && project) loadMenteeFiles(menteeEmail, project);
       }
       return newSet;
     });
   };
 
-  const loadMenteeFiles = async (menteeEmail) => {
-    if (!menteeEmail || menteeFiles[menteeEmail] !== undefined) return;
+  const loadMenteeFiles = async (menteeEmail, project) => {
+    // Use menteeEmail + projectName as cache key to support multiple projects per mentee
+    const cacheKey = `${menteeEmail}__${project.projectName}`;
+    if (!menteeEmail || menteeFiles[cacheKey] !== undefined) return;
     setFilesLoading(menteeEmail);
     try {
-      const res = await axios.get(`${API}/files/metadata/${menteeEmail}`);
+      // Build URL with projectName filter for archived projects
+      let url = `${API}/files/metadata/${menteeEmail}`;
+      if (project?.isArchived) {
+        // For archived projects, filter by specific project name
+        url += `?projectName=${encodeURIComponent(project.projectName)}`;
+      }
+      
+      const res = await axios.get(url);
       const map = {};
-      (res.data.data || []).forEach(f => {
+      // If project is archived, use archived files; otherwise use active files
+      // Note: finalRemark alone doesn't mean files are archived - they're only archived when mentee creates new project
+      const filesToDisplay = project?.isArchived
+        ? (res.data.archivedFiles || [])
+        : (res.data.data || []);
+      
+      filesToDisplay.forEach(f => {
         map[f.section] = {
           fileURL: f.file_url,
           filename: f.file_name,
@@ -112,9 +128,9 @@ export default function ProjectCoordinatorDashboard() {
           timestamp: f.updatedAt,
         };
       });
-      setMenteeFiles(prev => ({ ...prev, [menteeEmail]: map }));
+      setMenteeFiles(prev => ({ ...prev, [cacheKey]: map }));
     } catch {
-      setMenteeFiles(prev => ({ ...prev, [menteeEmail]: {} }));
+      setMenteeFiles(prev => ({ ...prev, [cacheKey]: {} }));
     } finally {
       setFilesLoading(null);
     }
@@ -161,10 +177,31 @@ export default function ProjectCoordinatorDashboard() {
     axios.get(`${API}/batches`).then(r => {
       const batchList = r.data.data || [];
       setBatches(batchList);
+      
       // Set active batch for display
       const active = batchList.find(b => b.isActive);
       if (active) setActiveBatch(active.name);
-    }).catch(() => {});
+      
+      // Set initial tab based on whether batches exist
+      if (!initialTabSet) {
+        if (batchList.length === 0) {
+          // No academic years created yet - start with batches tab
+          setTab('batches');
+          console.log('[PC Dashboard] No academic years found - showing Academic Year tab');
+        } else {
+          // Academic years exist - start with mentees tab
+          setTab('mentees');
+          console.log('[PC Dashboard] Academic years exist - showing Mentees & Projects tab');
+        }
+        setInitialTabSet(true);
+      }
+    }).catch(() => {
+      // On error, default to batches tab if not set
+      if (!initialTabSet) {
+        setTab('batches');
+        setInitialTabSet(true);
+      }
+    });
   };
 
   const handleCreateBatch = async () => {
@@ -177,6 +214,14 @@ export default function ProjectCoordinatorDashboard() {
       flash('Academic year created successfully!', 'success');
       setBatchForm({ name: '', isActive: false });
       fetchBatches();
+      
+      // After creating first batch, switch to mentees tab
+      if (batches.length === 0) {
+        setTimeout(() => {
+          setTab('mentees');
+          flash('Academic year created! You can now manage mentees and projects.', 'success');
+        }, 1500);
+      }
     } catch (err) {
       flash(err.response?.data?.message || 'Failed to create batch', 'error');
     } finally {
@@ -593,7 +638,12 @@ export default function ProjectCoordinatorDashboard() {
                           )}
                           {(status === 'approved') && (
                             <button
-                              onClick={() => { setForm({ menteeEmail: m.email, mentorEmail: '', duration: '6_months' }); setTab('assign'); }}
+                              onClick={() => { 
+                                // Fetch mentee's project duration, default to 6_months if not set
+                                const menteeDuration = m.projectDuration || '6_months';
+                                setForm({ menteeEmail: m.email, mentorEmail: '', duration: menteeDuration }); 
+                                setTab('assign'); 
+                              }}
                               className="px-3 py-1.5 rounded-lg text-xs font-medium"
                               style={{ background: 'rgba(236,72,153,0.1)', color: '#f472b6', border: '1px solid rgba(236,72,153,0.2)' }}>
                               ➕ Assign Mentor
@@ -614,7 +664,11 @@ export default function ProjectCoordinatorDashboard() {
               style={{ border: '1px solid rgba(236,72,153,0.12)', boxShadow: '0 0 40px rgba(236,72,153,0.06)' }}>
 
               <Field label="Select Mentee">
-                <select className={inputCls} value={form.menteeEmail} onChange={e => setForm({ ...form, menteeEmail: e.target.value })}>
+                <select className={inputCls} value={form.menteeEmail} onChange={e => {
+                  const selectedMentee = mentees.find(m => m.email === e.target.value);
+                  const menteeDuration = selectedMentee?.projectDuration || '6_months';
+                  setForm({ ...form, menteeEmail: e.target.value, duration: menteeDuration });
+                }}>
                   <option value="">-- Choose Mentee --</option>
                   {mentees
                     .filter(m => m.projectStatus === 'approved')
@@ -628,7 +682,10 @@ export default function ProjectCoordinatorDashboard() {
               {form.menteeEmail && (
                 <div className="px-3 py-2 rounded-xl text-xs" style={{ background: 'rgba(99,102,241,0.08)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.15)' }}>
                   📁 Project: {mentees.find(m => m.email === form.menteeEmail)?.projectName || '—'}
-                  <span className="ml-2 opacity-60">(auto-fetched, will be locked after assignment)</span>
+                  <span className="ml-2">
+                    • Duration: {form.duration === '1_year' ? '1 Year' : '6 Months'}
+                  </span>
+                  <span className="ml-2 opacity-60">(auto-fetched from mentee's project, can be changed below)</span>
                 </div>
               )}
 
@@ -914,6 +971,29 @@ student2@college.com,mentor2@college.com,1_year`}
           {/* ── ACADEMIC YEARS (BATCHES) TAB ── */}
           {tab === 'batches' && (
             <div className="space-y-6">
+              {/* Welcome Message for First-Time Setup */}
+              {batches.length === 0 && (
+                <div className="glass rounded-2xl p-6" style={{ 
+                  border: '1px solid rgba(236,72,153,0.2)',
+                  background: 'linear-gradient(135deg, rgba(236,72,153,0.05), rgba(168,85,247,0.05))'
+                }}>
+                  <div className="flex items-start gap-4">
+                    <div className="text-4xl">🎓</div>
+                    <div>
+                      <h3 className="text-lg font-bold mb-2" style={{ color: 'var(--text-primary)' }}>
+                        Welcome to Project Review Platform!
+                      </h3>
+                      <p className="text-sm mb-3" style={{ color: 'var(--text-secondary)' }}>
+                        To get started, please create your first academic year below. Academic years help organize projects by year.
+                      </p>
+                      <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                        💡 Example: "2025-26" for academic year 2025-2026
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Create New Batch Form */}
               <div className="glass rounded-2xl p-6" style={{ border: '1px solid rgba(236,72,153,0.12)' }}>
                 <h2 className="text-lg font-semibold mb-4" style={{ color: 'var(--text-primary)' }}>
@@ -1107,7 +1187,7 @@ student2@college.com,mentor2@college.com,1_year`}
                                     <div key={project._id} className="rounded-xl overflow-hidden" style={{ border: '1px solid rgba(236,72,153,0.08)' }}>
                                       {/* Project Header - Clickable */}
                                       <button
-                                        onClick={() => toggleProject(project._id, project.mentee?.email)}
+                                        onClick={() => toggleProject(project._id, project.mentee?.email, project)}
                                         className="w-full px-4 py-3 flex items-center justify-between hover:bg-opacity-50 transition-all"
                                         style={{ background: isProjectExpanded ? 'rgba(99,102,241,0.08)' : 'rgba(255,255,255,0.02)' }}
                                       >
@@ -1174,7 +1254,8 @@ student2@college.com,mentor2@college.com,1_year`}
                                                 </thead>
                                                 <tbody>
                                                   {getAllowedPhases(project.duration).map(key => {
-                                                    const upload = (menteeFiles[project.mentee?.email] || {})[key];
+                                                    const cacheKey = `${project.mentee?.email}__${project.projectName}`;
+                                                    const upload = (menteeFiles[cacheKey] || {})[key];
                                                     return (
                                                       <tr key={key} style={{ borderBottom: '1px solid rgba(236,72,153,0.06)', opacity: upload ? 1 : 0.4 }}>
                                                         <td className="px-4 py-2.5 text-sm" style={{ color: 'var(--text-primary)' }}>
@@ -1262,7 +1343,7 @@ student2@college.com,mentor2@college.com,1_year`}
                                 return (
                                   <div key={project._id} className="rounded-xl overflow-hidden" style={{ border: '1px solid rgba(236,72,153,0.08)' }}>
                                     <button
-                                      onClick={() => toggleProject(project._id, project.mentee?.email)}
+                                      onClick={() => toggleProject(project._id, project.mentee?.email, project)}
                                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-opacity-50 transition-all"
                                       style={{ background: isProjectExpanded ? 'rgba(99,102,241,0.08)' : 'rgba(255,255,255,0.02)' }}
                                     >
@@ -1327,7 +1408,8 @@ student2@college.com,mentor2@college.com,1_year`}
                                               </thead>
                                               <tbody>
                                                 {getAllowedPhases(project.duration || '6_months').map(key => {
-                                                  const upload = (menteeFiles[project.mentee?.email] || {})[key];
+                                                  const cacheKey = `${project.mentee?.email}__${project.projectName}`;
+                                                  const upload = (menteeFiles[cacheKey] || {})[key];
                                                   return (
                                                     <tr key={key} style={{ borderBottom: '1px solid rgba(236,72,153,0.06)', opacity: upload ? 1 : 0.4 }}>
                                                       <td className="px-4 py-2.5 text-sm" style={{ color: 'var(--text-primary)' }}>

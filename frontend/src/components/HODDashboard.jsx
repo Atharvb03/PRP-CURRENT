@@ -64,26 +64,41 @@ export default function HODDashboard() {
     });
   };
 
-  const toggleProject = (projectId, menteeEmail) => {
+  const toggleProject = (projectId, menteeEmail, project) => {
     setExpandedProjects(prev => {
       const newSet = new Set(prev);
       if (newSet.has(projectId)) {
         newSet.delete(projectId);
       } else {
         newSet.add(projectId);
-        if (menteeEmail) loadMenteeFiles(menteeEmail);
+        if (menteeEmail && project) loadMenteeFiles(menteeEmail, project);
       }
       return newSet;
     });
   };
 
-  const loadMenteeFiles = async (menteeEmail) => {
-    if (!menteeEmail || menteeFiles[menteeEmail] !== undefined) return;
+  const loadMenteeFiles = async (menteeEmail, project) => {
+    // Use menteeEmail + projectName as cache key to support multiple projects per mentee
+    const cacheKey = `${menteeEmail}__${project.projectName}`;
+    if (!menteeEmail || menteeFiles[cacheKey] !== undefined) return;
     setFilesLoading(menteeEmail);
     try {
-      const res = await axios.get(`${API}/files/metadata/${menteeEmail}`);
+      // Build URL with projectName filter for archived projects
+      let url = `${API}/files/metadata/${menteeEmail}`;
+      if (project?.isArchived) {
+        // For archived projects, filter by specific project name
+        url += `?projectName=${encodeURIComponent(project.projectName)}`;
+      }
+      
+      const res = await axios.get(url);
       const map = {};
-      (res.data.data || []).forEach(f => {
+      // If project is archived, use archived files; otherwise use active files
+      // Note: finalRemark alone doesn't mean files are archived - they're only archived when mentee creates new project
+      const filesToDisplay = project?.isArchived
+        ? (res.data.archivedFiles || [])
+        : (res.data.data || []);
+      
+      filesToDisplay.forEach(f => {
         map[f.section] = {
           fileURL: f.file_url,
           filename: f.file_name,
@@ -91,9 +106,9 @@ export default function HODDashboard() {
           timestamp: f.updatedAt,
         };
       });
-      setMenteeFiles(prev => ({ ...prev, [menteeEmail]: map }));
+      setMenteeFiles(prev => ({ ...prev, [cacheKey]: map }));
     } catch {
-      setMenteeFiles(prev => ({ ...prev, [menteeEmail]: {} }));
+      setMenteeFiles(prev => ({ ...prev, [cacheKey]: {} }));
     } finally {
       setFilesLoading(null);
     }
@@ -421,7 +436,7 @@ export default function HODDashboard() {
                                     <div key={project._id} className="rounded-xl overflow-hidden" style={{ border: "1px solid rgba(236,72,153,0.08)" }}>
                                       {/* Project Header - Clickable */}
                                       <button
-                                        onClick={() => toggleProject(project._id, project.mentee?.email)}
+                                        onClick={() => toggleProject(project._id, project.mentee?.email, project)}
                                         className="w-full px-4 py-3 flex items-center justify-between hover:bg-opacity-50 transition-all"
                                         style={{ background: isProjectExpanded ? "rgba(99,102,241,0.08)" : "rgba(255,255,255,0.02)" }}
                                       >
@@ -488,7 +503,8 @@ export default function HODDashboard() {
                                                 </thead>
                                                 <tbody>
                                                   {getAllowedPhases(project.duration).map(key => {
-                                                    const upload = (menteeFiles[project.mentee?.email] || {})[key];
+                                                    const cacheKey = `${project.mentee?.email}__${project.projectName}`;
+                                                    const upload = (menteeFiles[cacheKey] || {})[key];
                                                     return (
                                                       <tr key={key} style={{ borderBottom: "1px solid rgba(236,72,153,0.06)", opacity: upload ? 1 : 0.4 }}>
                                                         <td className="px-4 py-2.5 text-sm" style={{ color: "var(--text-primary)" }}>
@@ -576,7 +592,7 @@ export default function HODDashboard() {
                                 return (
                                   <div key={project._id} className="rounded-xl overflow-hidden" style={{ border: "1px solid rgba(236,72,153,0.08)" }}>
                                     <button
-                                      onClick={() => toggleProject(project._id, project.mentee?.email)}
+                                      onClick={() => toggleProject(project._id, project.mentee?.email, project)}
                                       className="w-full px-4 py-3 flex items-center justify-between hover:bg-opacity-50 transition-all"
                                       style={{ background: isProjectExpanded ? "rgba(99,102,241,0.08)" : "rgba(255,255,255,0.02)" }}
                                     >
@@ -641,7 +657,8 @@ export default function HODDashboard() {
                                               </thead>
                                               <tbody>
                                                 {getAllowedPhases(project.duration || "6_months").map(key => {
-                                                  const upload = (menteeFiles[project.mentee?.email] || {})[key];
+                                                  const cacheKey = `${project.mentee?.email}__${project.projectName}`;
+                                                  const upload = (menteeFiles[cacheKey] || {})[key];
                                                   return (
                                                     <tr key={key} style={{ borderBottom: "1px solid rgba(236,72,153,0.06)", opacity: upload ? 1 : 0.4 }}>
                                                       <td className="px-4 py-2.5 text-sm" style={{ color: "var(--text-primary)" }}>
@@ -755,18 +772,26 @@ export default function HODDashboard() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr style={{ background: "rgba(236,72,153,0.05)", borderBottom: "1px solid rgba(236,72,153,0.1)" }}>
-                      {["#", "Name", "Roll No", "Assigned Mentor", "Project", "Team Members"].map((h) => (
+                      {["#", "Name", "Roll No", "Assigned Mentor", "Projects", "Team Members"].map((h) => (
                         <th key={h} className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)", whiteSpace: 'nowrap' }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {mentees.map((m, i) => {
-                      const assignment = projects.find((p) => p.mentee?.email === m.email);
+                      // Find ALL projects for this mentee (both active and archived)
+                      const menteeProjects = projects.filter((p) => p.mentee?.email === m.email);
+                      const currentProject = menteeProjects.find(p => !p.isArchived && !p.finalRemark);
+                      const completedProjects = menteeProjects.filter(p => p.isArchived || p.finalRemark);
+                      
+                      // Get current assignment info
+                      const assignment = currentProject || menteeProjects[0];
                       const groupMembers = assignment?.groupMembers || m.groupMembers || [];
+                      
                       // Prefer data from assignment (hod/project-details) which does a fresh DB lookup
                       const displayName = m.name || assignment?.mentee?.name || m.email;
                       const displayRollNo = m.rollNo || assignment?.mentee?.rollNo || '';
+                      
                       return (
                         <tr key={m._id} style={{ borderTop: "1px solid rgba(236,72,153,0.06)" }}>
                           <td className="px-5 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{i + 1}</td>
@@ -781,7 +806,32 @@ export default function HODDashboard() {
                             {assignment?.mentor?.name || assignment?.mentor?.email || <span style={{ color: "var(--text-muted)" }}>Not assigned</span>}
                           </td>
                           <td className="px-5 py-3 text-xs" style={{ color: "var(--text-secondary)" }}>
-                            {assignment?.projectName || <span style={{ color: "var(--text-muted)" }}>—</span>}
+                            {menteeProjects.length === 0 ? (
+                              <span style={{ color: "var(--text-muted)" }}>—</span>
+                            ) : (
+                              <div className="flex flex-col gap-1.5">
+                                {/* Current/Active Project */}
+                                {currentProject && (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-xs px-2 py-0.5 rounded-full font-medium" 
+                                      style={{ background: 'rgba(236,72,153,0.12)', color: '#f472b6', border: '1px solid rgba(236,72,153,0.2)' }}>
+                                      Active
+                                    </span>
+                                    <span className="text-xs font-medium">{currentProject.projectName}</span>
+                                  </div>
+                                )}
+                                {/* Completed Projects */}
+                                {completedProjects.map((proj, idx) => (
+                                  <div key={idx} className="flex items-center gap-1.5">
+                                    <span className="text-xs px-2 py-0.5 rounded-full font-medium" 
+                                      style={{ background: 'rgba(16,185,129,0.12)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)' }}>
+                                      ✓
+                                    </span>
+                                    <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{proj.projectName}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </td>
                           <td className="px-5 py-3">
                             {groupMembers.length === 0 ? (
