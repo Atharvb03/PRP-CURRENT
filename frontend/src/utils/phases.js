@@ -57,7 +57,9 @@ export const PHASE_CONFIG = {
   achievements: {
     label: 'Achievements',
     allowedTypes: ['pdf', 'txt', 'docs', 'docx'],
-    required: [],
+    // Special: Unlocks only after ALL previous phases are uploaded
+    // This is handled by custom logic in MenteeDashboard isActive() function
+    required: ['finalDemo'], // Placeholder - actual logic checks all previous phases
   },
 };
 

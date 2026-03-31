@@ -62,7 +62,12 @@ function Login() {
         setLoginError('Invalid email or password. Please try again.');
       }
     } catch (err) {
-      setLoginError(err.response?.data?.message || 'An error occurred. Please try again later.');
+      const errorData = err.response?.data;
+      if (errorData?.requiresVerification) {
+        setLoginError('⚠️ ' + errorData.message);
+      } else {
+        setLoginError(errorData?.message || 'An error occurred. Please try again later.');
+      }
     } finally {
       setLoading(false);
     }

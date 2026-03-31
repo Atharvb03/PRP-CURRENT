@@ -35,7 +35,10 @@ function Signup() {
     setEmailError(''); setPasswordError(''); setServerMessage('');
     if (!name.trim()) { setServerMessage('Full name is required.'); setIsSuccess(false); return; }
     if (!validateEmail(email)) { setEmailError('Please enter a valid email address.'); return; }
-    if (password.length < 6) { setPasswordError('Password must be at least 6 characters.'); return; }
+    if (password.length < 8) { 
+      setPasswordError('Password must be at least 8 characters with 1 uppercase, 1 lowercase, and 1 number.'); 
+      return; 
+    }
     if (role === 'mentee' && !rollNo.trim()) { setServerMessage('Roll number is required for mentees.'); setIsSuccess(false); return; }
     if (role === 'mentee' && !contactNo.trim()) { setServerMessage('Contact number is required for mentees.'); setIsSuccess(false); return; }
     if (['mentor', 'project_coordinator'].includes(role) && !inviteCode.trim()) { setServerMessage('Invite code is required for this role.'); setIsSuccess(false); return; }
@@ -51,8 +54,13 @@ function Signup() {
         contactNo: role === 'mentee' ? contactNo.trim() : undefined,
       });
       setIsSuccess(true);
-      // If a new role was added to an existing account, clear old token and force re-login
-      if (response.data.requireReLogin) {
+      
+      // Check if email verification is required
+      if (response.data.requiresVerification) {
+        setServerMessage('✅ ' + response.data.message + ' Please check your email inbox (and spam folder) for the verification link.');
+        setName(''); setEmail(''); setPassword(''); setRole('mentee'); setInviteCode(''); setRollNo(''); setContactNo('');
+      } else if (response.data.requireReLogin) {
+        // If a new role was added to an existing account, clear old token and force re-login
         localStorage.removeItem('token');
         localStorage.removeItem('userEmail');
         localStorage.removeItem('userRole');
