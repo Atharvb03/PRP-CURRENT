@@ -17,11 +17,14 @@ cd Project-Review-Platform-PRP--main/backend
 node clear-data-keep-staff-safe.js
 
 Github commands to create new branch.
-git checkout -b GOOGLE LOGIN/SIGNUP ADDED
+git checkout -b GOOGLE 
 git add .
-git commit -m "Your message"
-git push origin production-ready1
+git commit -m "GOOGLE LOGIN/SIGNUP ADDED"
+git push origin GOOGLE 
 
+TO Accept Pull from main github
+git fetch origin
+git merge origin/main
 
 🛠️ DEVELOPER TOOLS ADDED
 Debugging Scripts

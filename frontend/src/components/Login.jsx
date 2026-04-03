@@ -6,6 +6,19 @@ import { useTheme } from '../context/ThemeContext';
 function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+
+  // If a pending-profile token exists, go straight to complete-profile
+  React.useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      const isPending = payload.activeRole === 'pending' ||
+                        payload.roles?.length === 0 ||
+                        (payload.roles?.length === 1 && payload.roles[0] === 'pending');
+      if (isPending) window.location.replace('/complete-profile');
+    } catch (_) {}
+  }, []);
   const [loginError, setLoginError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);

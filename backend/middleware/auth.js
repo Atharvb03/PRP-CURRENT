@@ -25,11 +25,12 @@ function verifyToken(req, res, next) {
     req.userEmail = decoded.email;
     req.userRole  = decoded.activeRole || decoded.roles?.[0] || '';
 
-    // Block pending-role tokens from all routes except complete-profile
+    // Block pending-role tokens from all routes except complete-profile and profile-status
     const isPending = decoded.activeRole === 'pending' || 
                       (decoded.roles?.length === 0) ||
                       (decoded.roles?.length === 1 && decoded.roles[0] === 'pending');
-    if (isPending && !req.path.includes('/auth/complete-profile')) {
+    const allowedPendingPaths = ['/auth/complete-profile', '/auth/profile-status'];
+    if (isPending && !allowedPendingPaths.some(p => req.path.includes(p))) {
       return res.status(403).json({ 
         success: false, 
         message: 'Profile setup required. Please complete your profile first.',

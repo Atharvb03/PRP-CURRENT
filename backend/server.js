@@ -469,13 +469,25 @@ app.get('/api/files/metadata/:menteeEmail', requireRole('mentee', 'mentor', 'hod
     const archivedFiles = await db.collection(FILE_COL).find(archivedQuery)
       .sort({ archivedAt: -1, archivedProjectName: 1, section: 1 })
       .toArray();
+
+    // Enrich archived files with academic year (batch) name
+    const enrichedArchivedFiles = await Promise.all(archivedFiles.map(async (f) => {
+      // Find the archived assignment matching this file's project
+      const matchingAssignment = archivedAssignments.find(a => a.projectName === f.archivedProjectName);
+      let batchName = null;
+      if (matchingAssignment?.batchId) {
+        const batch = await batchesCollection.findOne({ _id: matchingAssignment.batchId });
+        batchName = batch?.name || null;
+      }
+      return { ...f, batchName };
+    }));
     
     console.log(`[FILES] Found ${activeFiles.length} active files and ${archivedFiles.length} archived files for ${menteeEmail}${projectName ? ` (project: ${projectName})` : ''}`);
     
     res.json({
       success: true,
       data: activeFiles,
-      archivedFiles: archivedFiles, // Separate array for archived files
+      archivedFiles: enrichedArchivedFiles,
       deadline: activeAssignment?.deadline || null,
       extendedDeadline: activeAssignment?.extendedDeadline || null,
     });
@@ -885,49 +897,51 @@ app.post("/api/mentee/create-project", requireRole('mentee'), async (req, res) =
         console.log('[CREATE PROJECT] Active batch ID:', activeBatch._id);
         
         // CRITICAL: Check ALL projects in current batch (including archived ones)
-        // This prevents creating multiple projects after completing a 1-year project
         const allProjectsInBatch = await projectsCollection.find({
             menteeEmail: req.userEmail,
-            batchId: activeBatch._id
+            $or: [
+                { batchId: activeBatch._id },
+                { batchId: { $exists: false } },
+                { batchId: null }
+            ]
         }).toArray();
-        
+
         console.log('[CREATE PROJECT] Total projects in current batch:', allProjectsInBatch.length);
-        console.log('[CREATE PROJECT] Projects details:', JSON.stringify(allProjectsInBatch.map(p => ({
-            name: p.projectName,
-            duration: p.duration,
-            isCompleted: p.isCompleted,
-            batchId: p.batchId,
-            isArchived: p.isArchived
-        })), null, 2));
-        
+
         // Check if any completed 1-year project exists in this batch
-        const has1YearProjectInBatch = allProjectsInBatch.some(p => 
+        const has1YearProjectInBatch = allProjectsInBatch.some(p =>
             p.duration === '1_year' && p.isCompleted
         );
-        
-        console.log('[CREATE PROJECT] Has completed 1-year project in batch?', has1YearProjectInBatch);
-        
+
         if (has1YearProjectInBatch) {
             console.log('[CREATE PROJECT] Already has a completed 1-year project in this batch - BLOCKED');
-            return res.status(400).json({ 
-                success: false, 
-                message: "You cannot create another project in the same academic year after completing a 1-year project. Please wait for the next academic year." 
+            return res.status(400).json({
+                success: false,
+                message: "You cannot create another project in the same academic year after completing a 1-year project. Please wait for the next academic year."
             });
         }
-        
+
         // Count ALL 6-month projects in current batch (both completed and active)
-        const total6MonthProjects = allProjectsInBatch.filter(p => 
+        const total6MonthProjects = allProjectsInBatch.filter(p =>
             p.duration === '6_months'
         ).length;
-        
+
         console.log('[CREATE PROJECT] Total 6-month projects in current batch:', total6MonthProjects);
-        
+
         // Check if already has 2 six-month projects (regardless of completion status)
         if (total6MonthProjects >= 2) {
             console.log('[CREATE PROJECT] Already has 2 six-month projects in this batch - BLOCKED');
-            return res.status(400).json({ 
-                success: false, 
-                message: "You have already created 2 projects in this academic year. Maximum 2 projects (6-months each) allowed per year." 
+            return res.status(400).json({
+                success: false,
+                message: "You have already created 2 projects in this academic year. Maximum 2 projects (6-months each) allowed per year."
+            });
+        }
+
+        // If a 6-month project already exists in this batch, second project must also be 6-month
+        if (total6MonthProjects >= 1 && projectDuration === '1_year') {
+            return res.status(400).json({
+                success: false,
+                message: "Your second project in the same academic year must be 6 months. A 1-year project is only allowed as your first project."
             });
         }
         
@@ -1235,10 +1249,35 @@ app.get("/api/mentee/status", requireRole('mentee'), async (req, res) => {
             menteeEmail: req.userEmail,
             isArchived: { $ne: true } // Only get active project
         });
-        const resolvedDuration = project?.duration || assignment?.duration || '6_months';
-        
+
+        // If no active assignment/project, fall back to most recent archived ones for display
+        // For 1-year completed projects OR mentee who has completed both 6-month projects
+        const archivedAssignment = !assignment ? await db.collection("assignments").findOne(
+            { menteeEmail: req.userEmail, isArchived: true },
+            { sort: { archivedAt: -1 } }
+        ) : null;
+        const archivedProject = !project ? await projectsCollection.findOne(
+            { menteeEmail: req.userEmail, isArchived: true },
+            { sort: { archivedAt: -1 } }
+        ) : null;
+
+        // Only use archived fallback if:
+        // 1. It's a 1-year project, OR
+        // 2. Mentee has at least 1 completed 6-month project (show archived view until new project is created)
+        const archivedCount = !assignment ? await db.collection("assignments").countDocuments(
+            { menteeEmail: req.userEmail, isArchived: true }
+        ) : 0;
+        const use6MonthFallback = archivedCount >= 1 && archivedProject?.duration === '6_months';
+        const use1YearFallback  = archivedProject?.duration === '1_year';
+        const useArchivedFallback = use1YearFallback || use6MonthFallback;
+
+        const effectiveAssignment = assignment || (useArchivedFallback ? archivedAssignment : null);
+        const effectiveProject    = project    || (useArchivedFallback ? archivedProject    : null);
+
+        const resolvedDuration = effectiveProject?.duration || effectiveAssignment?.duration || '6_months';
+
         // Check if current project is completed
-        const isProjectCompleted = project?.isCompleted || assignment?.finalRemark || false;
+        const isProjectCompleted = effectiveProject?.isCompleted || effectiveAssignment?.finalRemark || false;
         
         // ADDED: Check project limits in current academic year
         const activeBatch = await batchesCollection.findOne({ isActive: true });
@@ -1248,28 +1287,32 @@ app.get("/api/mentee/status", requireRole('mentee'), async (req, res) => {
         let has1YearCompleted = false;
         
         if (activeBatch && canCreateNewProject) {
-            // Get all projects in current batch (including archived ones)
+            // Get all projects in current batch — also include projects with no batchId (legacy data)
             const allProjectsInBatch = await projectsCollection.find({
                 menteeEmail: req.userEmail,
-                batchId: activeBatch._id
+                $or: [
+                    { batchId: activeBatch._id },
+                    { batchId: { $exists: false } },
+                    { batchId: null }
+                ]
             }).toArray();
-            
+
             // Check if has completed 1-year project in this batch
-            has1YearCompleted = allProjectsInBatch.some(p => 
+            has1YearCompleted = allProjectsInBatch.some(p =>
                 p.duration === '1_year' && p.isCompleted
             );
-            
+
             // Count ALL 6-month projects in this batch (both completed and active)
-            const total6MonthProjects = allProjectsInBatch.filter(p => 
+            const total6MonthProjects = allProjectsInBatch.filter(p =>
                 p.duration === '6_months'
             ).length;
-            
+
             // For display purposes, also count completed ones
-            completed6MonthCount = allProjectsInBatch.filter(p => 
+            completed6MonthCount = allProjectsInBatch.filter(p =>
                 p.duration === '6_months' && p.isCompleted
             ).length;
-            
-            // Block if already has 1-year project or 2 six-month projects (total, not just completed)
+
+            // Block if already has completed 1-year project OR 2 six-month projects
             if (has1YearCompleted) {
                 canCreateNewProject = false;
                 projectLimitReason = '1_year_completed';
@@ -1289,19 +1332,19 @@ app.get("/api/mentee/status", requireRole('mentee'), async (req, res) => {
                 name: user.name || '',
                 rollNo: user.rollNo || '',
                 contactNo: user.contactNo || '',
-                projectName: user.projectName || '',
-                projectDuration: user.projectDuration || project?.duration || '6_months',
-                projectDescription: user.projectDescription || project?.description || '',
+                projectName: user.projectName || (useArchivedFallback ? effectiveProject?.projectName || effectiveAssignment?.projectName : '') || '',
+                projectDuration: user.projectDuration || effectiveProject?.duration || '6_months',
+                projectDescription: user.projectDescription || (useArchivedFallback ? effectiveProject?.description : '') || '',
                 projectStatus: user.projectStatus || 'pending',
                 groupMembers: user.groupMembers || [],
-                assignment: assignment || null,
-                deadline: assignment?.deadline || null,
-                extendedDeadline: assignment?.extendedDeadline || null,
-                duration: resolvedDuration, // ADDED
-                isProjectCompleted, // ADDED
-                canCreateNewProject, // ADDED
-                projectLimitReason, // ADDED: reason why can't create new project
-                completed6MonthCount, // ADDED: count of completed 6-month projects
+                assignment: (useArchivedFallback ? effectiveAssignment : assignment) || null,
+                deadline: (useArchivedFallback ? effectiveAssignment : assignment)?.deadline || null,
+                extendedDeadline: (useArchivedFallback ? effectiveAssignment : assignment)?.extendedDeadline || null,
+                duration: resolvedDuration,
+                isProjectCompleted,
+                canCreateNewProject,
+                projectLimitReason,
+                completed6MonthCount,
                 has1YearCompleted, // ADDED: whether 1-year project is completed
                 notifications,
             }
@@ -1809,7 +1852,7 @@ app.delete("/api/users/:email", verifyToken, checkRole('project_coordinator', 'h
             db.collection('assignments').deleteMany({ $or: [{ menteeEmail: email }, { mentorEmail: email }] }),
             projectsCollection.deleteMany({ menteeEmail: email }),
             db.collection('notifications').deleteMany({ recipientEmail: email }),
-            db.collection('files_metadata').deleteMany({ menteeEmail: email }),
+            db.collection('file_metadata').deleteMany({ uploaded_by: email }),
         ]);
 
         res.json({ success: true, message: `User ${email} and all related data removed successfully` });
@@ -2365,10 +2408,8 @@ app.post("/api/assignments/bulk-csv", verifyToken, checkRole('project_coordinato
 // GET /api/assignments — get all assignments — coordinator and hod
 app.get("/api/assignments", verifyToken, checkRole('project_coordinator', 'hod'), async (req, res) => {
     try {
-        // Only return active (non-archived) assignments
-        const assignments = await db.collection("assignments").find({ 
-            isArchived: { $ne: true } 
-        }).toArray();
+        // Return ALL assignments — active and archived — so coordinator sees full history
+        const assignments = await db.collection("assignments").find({}).sort({ createdAt: -1 }).toArray();
         res.json({ success: true, data: assignments });
     } catch (err) {
         res.status(500).json({ success: false, message: "Failed to fetch assignments" });
@@ -2409,25 +2450,27 @@ app.get("/api/assignments/mentor/:email", verifyToken, checkRole('mentor', 'proj
         // Enrich each assignment and filter by active academic year
         const enriched = await Promise.all(assignments.map(async (a) => {
             const mentee = await usersCollection.findOne({ email: a.menteeEmail });
-            // For archived assignments, look for archived project; for active, look for active project
-            const project = await projectsCollection.findOne({ 
-                menteeEmail: a.menteeEmail,
-                isArchived: a.isArchived ? true : { $ne: true }
-            });
-            // duration: prefer project doc (most up-to-date), fall back to assignment doc
+            // For archived assignments, look for archived project with matching name; for active, look for active project
+            const project = a.isArchived
+                ? await projectsCollection.findOne({ menteeEmail: a.menteeEmail, projectName: a.projectName, isArchived: true })
+                : await projectsCollection.findOne({ menteeEmail: a.menteeEmail, isArchived: { $ne: true } });
+
             const duration = project?.duration || a.duration || '6_months';
+            // batchId: prefer project doc, fall back to assignment doc itself
+            const batchId = project?.batchId || a.batchId || null;
             return { 
                 ...a, 
                 duration, 
                 groupMembers: mentee?.groupMembers || [], 
                 menteeName: mentee?.name || '',
-                batchId: project?.batchId // Include batchId for filtering
+                batchId
             };
         }));
         
         // Filter to only show projects from the active academic year
+        // Include assignments with no batchId (legacy data) so they're not silently hidden
         const filtered = enriched.filter(a => 
-            a.batchId && a.batchId.toString() === activeBatch._id.toString()
+            !a.batchId || a.batchId.toString() === activeBatch._id.toString()
         );
         
         res.json({ success: true, data: filtered });
@@ -2463,26 +2506,37 @@ app.patch("/api/assignments/:id/final-remark", requireRole('mentor'), async (req
 
     await db.collection("assignments").updateOne(
       { _id: new ObjectId(req.params.id) },
-      { $set: { finalRemark: finalRemark.trim(), finalRemarkedAt: new Date(), updatedAt: new Date() } }
+      { $set: { 
+          finalRemark: finalRemark.trim(), 
+          finalRemarkedAt: new Date(), 
+          updatedAt: new Date(),
+          isArchived: true,
+          archivedAt: new Date(),
+          archivedProjectName: assignment.projectName
+      }}
     );
-    
+
     console.log('[FINAL REMARK] Marking project as completed for mentee:', assignment.menteeEmail);
-    
-    // Mark project as completed in projects collection
-    const projectUpdateResult = await projectsCollection.updateOne(
+
+    // Mark project as completed AND archived
+    await projectsCollection.updateOne(
       { menteeEmail: assignment.menteeEmail, isArchived: { $ne: true } },
-      { $set: { isCompleted: true, completedAt: new Date() } }
+      { $set: { isCompleted: true, completedAt: new Date(), isArchived: true, archivedAt: new Date() } }
     );
-    
-    console.log('[FINAL REMARK] Project update result:', projectUpdateResult.modifiedCount, 'documents modified');
-    
-    // Mark project as completed in users collection
+
+    // Archive active files
+    await db.collection(FILE_COL).updateMany(
+      { uploaded_by: assignment.menteeEmail, isArchived: { $ne: true } },
+      { $set: { isArchived: true, archivedAt: new Date(), archivedProjectName: assignment.projectName } }
+    );
+
+    // Reset mentee so they can submit a new project
     await usersCollection.updateOne(
       { email: assignment.menteeEmail },
-      { $set: { projectCompleted: true } }
+      { $set: { projectCompleted: true, projectStatus: 'pending', projectName: '' } }
     );
-    
-    console.log('[FINAL REMARK] Project marked as completed successfully');
+
+    console.log('[FINAL REMARK] Project completed and archived successfully');
     
     res.json({ success: true, message: 'Final remark saved' });
 
@@ -2510,6 +2564,45 @@ app.patch("/api/assignments/:id/final-remark", requireRole('mentor'), async (req
   } catch (err) {
     console.error('Final remark error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /api/admin/repair-completed-files — archive files for already-finalised assignments
+// Run once to fix existing data where finalRemark was set but files weren't archived
+app.post("/api/admin/repair-completed-files", verifyToken, checkRole('project_coordinator', 'hod'), async (req, res) => {
+  try {
+    const finalised = await db.collection("assignments").find({
+      finalRemark: { $exists: true, $ne: null, $ne: '' }
+    }).toArray();
+
+    let fixed = 0;
+    for (const a of finalised) {
+      // Archive files that are still active
+      const r1 = await db.collection(FILE_COL).updateMany(
+        { uploaded_by: a.menteeEmail, isArchived: { $ne: true } },
+        { $set: { isArchived: true, archivedAt: new Date(), archivedProjectName: a.projectName } }
+      );
+      // Archive project doc
+      await projectsCollection.updateOne(
+        { menteeEmail: a.menteeEmail, isArchived: { $ne: true } },
+        { $set: { isCompleted: true, isArchived: true, archivedAt: new Date(), completedAt: a.finalRemarkedAt || new Date() } }
+      );
+      // Ensure assignment itself is archived
+      await db.collection("assignments").updateOne(
+        { _id: a._id, isArchived: { $ne: true } },
+        { $set: { isArchived: true, archivedAt: new Date(), archivedProjectName: a.projectName } }
+      );
+      // Reset mentee status if still showing as assigned
+      await usersCollection.updateOne(
+        { email: a.menteeEmail, projectStatus: { $in: ['assigned', 'approved'] } },
+        { $set: { projectStatus: 'pending', projectName: '', projectCompleted: true } }
+      );
+      if (r1.modifiedCount > 0) fixed++;
+    }
+    res.json({ success: true, message: `Repaired ${fixed} mentee(s) with unarchived files`, total: finalised.length });
+  } catch (err) {
+    console.error('[REPAIR]', err);
+    res.status(500).json({ success: false, message: 'Repair failed' });
   }
 });
 

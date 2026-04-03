@@ -54,7 +54,12 @@ function CompleteProfile() {
       } else {
         setChecking(false);
       }
-    }).catch(() => {
+    }).catch((err) => {
+      // 403 with needsProfile = valid pending token, just stay on this page
+      if (err.response?.status === 403 && err.response?.data?.needsProfile) {
+        setChecking(false);
+        return;
+      }
       localStorage.removeItem('token');
       navigate('/login', { replace: true });
     });

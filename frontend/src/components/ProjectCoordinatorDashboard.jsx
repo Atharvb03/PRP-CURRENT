@@ -105,18 +105,16 @@ export default function ProjectCoordinatorDashboard() {
     if (!menteeEmail || menteeFiles[cacheKey] !== undefined) return;
     setFilesLoading(menteeEmail);
     try {
-      // Build URL with projectName filter for archived projects
+      // Build URL with projectName filter for archived/completed projects
       let url = `${API}/files/metadata/${menteeEmail}`;
-      if (project?.isArchived) {
-        // For archived projects, filter by specific project name
+      if (project?.isArchived || project?.finalRemark) {
         url += `?projectName=${encodeURIComponent(project.projectName)}`;
       }
       
       const res = await axios.get(url);
       const map = {};
-      // If project is archived, use archived files; otherwise use active files
-      // Note: finalRemark alone doesn't mean files are archived - they're only archived when mentee creates new project
-      const filesToDisplay = project?.isArchived
+      // If project is archived OR has finalRemark (completed), use archived files
+      const filesToDisplay = (project?.isArchived || project?.finalRemark)
         ? (res.data.archivedFiles || [])
         : (res.data.data || []);
       
@@ -616,6 +614,9 @@ export default function ProjectCoordinatorDashboard() {
                 </div>
               ) : mentees.map((m) => {
                 const status = m.projectStatus || 'pending';
+                // Check if this mentee's CURRENT (non-archived) assignment is finalised
+                const isFinalised = assignments.some(a => a.menteeEmail === m.email && a.finalRemark && !a.isArchived);
+
                 const statusColor = status === 'assigned' ? '#10b981' : status === 'approved' ? '#818cf8' : status === 'rejected' ? '#f87171' : '#f59e0b';
                 const statusBg = status === 'assigned' ? 'rgba(16,185,129,0.1)' : status === 'approved' ? 'rgba(99,102,241,0.1)' : status === 'rejected' ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.1)';
                 return (
@@ -646,9 +647,29 @@ export default function ProjectCoordinatorDashboard() {
                             </div>
                           </div>
                         )}
+                        {/* Past completed projects from archived assignments */}
+                        {(() => {
+                          const past = assignments.filter(a => a.isArchived && a.menteeEmail === m.email);
+                          if (!past.length) return null;
+                          return (
+                            <div className="mt-2 pt-2" style={{ borderTop: '1px solid rgba(16,185,129,0.12)' }}>
+                              <p className="text-xs font-semibold mb-1.5" style={{ color: '#10b981' }}>📂 Past Projects</p>
+                              <div className="flex flex-col gap-1">
+                                {past.map((a, i) => (
+                                  <div key={i} className="flex items-center gap-2 text-xs px-2 py-1 rounded-lg"
+                                    style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.1)' }}>
+                                    <span style={{ color: '#10b981' }}>✅</span>
+                                    <span style={{ color: 'var(--text-secondary)' }}>{a.projectName}</span>
+                                    {a.finalRemark && <span style={{ color: 'var(--text-muted)' }}>— {a.finalRemark.length > 25 ? a.finalRemark.slice(0,25)+'…' : a.finalRemark}</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                       <div className="flex gap-2 flex-wrap items-start">
-                        {status !== 'assigned' && (
+                        {!isFinalised && status !== 'assigned' && (
                           <>
                             {status !== 'approved' && (
                               <button
@@ -899,9 +920,23 @@ student2@college.com,mentor2@college.com,1_year`}
                 </div>
               ) : assignments.map((a) => (
                 <div key={a._id} className="glass rounded-2xl p-5 flex items-start justify-between gap-4"
-                  style={{ border: '1px solid rgba(236,72,153,0.1)' }}>
+                  style={{ border: `1px solid ${a.isArchived ? 'rgba(16,185,129,0.2)' : 'rgba(236,72,153,0.1)'}` }}>
                   <div className="flex-1 space-y-1">
-                    <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>{a.projectName}</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>{a.projectName}</p>
+                      {a.isArchived && (
+                        <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                          style={{ background: 'rgba(16,185,129,0.12)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)' }}>
+                          ✅ Completed
+                        </span>
+                      )}
+                      {a.finalRemark && (
+                        <span className="text-xs px-2 py-0.5 rounded-full"
+                          style={{ background: 'rgba(16,185,129,0.08)', color: '#6ee7b7' }}>
+                          "{a.finalRemark.length > 30 ? a.finalRemark.slice(0, 30) + '…' : a.finalRemark}"
+                        </span>
+                      )}
+                    </div>
                     <div className="flex flex-wrap gap-3 text-xs mt-2">
                       <span className="flex items-center gap-1 px-2 py-1 rounded-lg" style={{ background: 'rgba(236,72,153,0.1)', color: '#f472b6' }}>
                         🎓 {a.mentorEmail}
@@ -1009,6 +1044,30 @@ student2@college.com,mentor2@college.com,1_year`}
           {/* ── ACADEMIC YEARS (BATCHES) TAB ── */}
           {tab === 'batches' && (
             <div className="space-y-6">
+              {/* One-time repair tool for existing completed projects */}
+              <div className="glass rounded-2xl p-4 flex items-center justify-between gap-4"
+                style={{ border: '1px solid rgba(245,158,11,0.2)', background: 'rgba(245,158,11,0.04)' }}>
+                <div>
+                  <p className="text-sm font-semibold" style={{ color: '#f59e0b' }}>🔧 Data Repair</p>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    Archive files for mentees whose projects were already finalised by mentor.
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await axios.post(`${API}/admin/repair-completed-files`);
+                      flash(res.data.message, 'success');
+                      axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+                    } catch (err) {
+                      flash(err.response?.data?.message || 'Repair failed', 'error');
+                    }
+                  }}
+                  className="shrink-0 px-4 py-2 rounded-xl text-xs font-semibold"
+                  style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)' }}>
+                  Run Repair
+                </button>
+              </div>
               {/* Welcome Message for First-Time Setup */}
               {batches.length === 0 && (
                 <div className="glass rounded-2xl p-6" style={{ 
@@ -1177,7 +1236,13 @@ student2@college.com,mentor2@college.com,1_year`}
                 <div className="space-y-3">
                   {/* List all batches */}
                   {batches.map(batch => {
-                    const batchProjects = projects.filter(p => p.batchId?.toString() === batch._id.toString());
+                    // Include projects matching this batch, plus archived projects with no batchId under the active batch
+                    const batchProjects = projects.filter(p => {
+                      if (p.batchId?.toString() === batch._id.toString()) return true;
+                      // Show archived/completed projects with no batchId under the active batch
+                      if (batch.isActive && !p.batchId && (p.isArchived || p.finalRemark)) return true;
+                      return false;
+                    });
                     const isExpanded = expandedBatches.has(batch._id);
                     
                     return (

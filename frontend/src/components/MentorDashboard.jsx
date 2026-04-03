@@ -364,7 +364,7 @@ export default function MentorDashboard() {
                       }}>
                       <p className="text-xs font-medium truncate" style={{ color: 'var(--text-primary)' }}>{a.menteeName || a.menteeEmail}</p>
                       <p className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>📁 {a.projectName}</p>
-                      <p className="text-xs mt-0.5" style={{ color: '#10b981' }}>✅ {a.finalRemark || 'Completed'}</p>
+                      <p className="text-xs mt-0.5 break-words overflow-hidden" style={{ color: '#10b981', wordBreak: 'break-word' }}>✅ {a.finalRemark ? (a.finalRemark.length > 40 ? a.finalRemark.slice(0, 40) + '…' : a.finalRemark) : 'Completed'}</p>
                     </button>
                   ))}
                 </>
@@ -772,7 +772,7 @@ export default function MentorDashboard() {
                   </div>
                   <div>
                     <p className="text-sm font-semibold" style={{ color: '#10b981' }}>Project Accepted</p>
-                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    <p className="text-xs mt-0.5 break-words" style={{ color: 'var(--text-muted)', wordBreak: 'break-word' }}>
                       "{selectedAssignment.finalRemark}"
                       {selectedAssignment.finalRemarkedAt && (
                         <> · {new Date(selectedAssignment.finalRemarkedAt).toLocaleDateString()}</>
