@@ -83,6 +83,11 @@ function Login() {
       }
     } catch (err) {
       const errorData = err.response?.data;
+      // User not found (deleted) — redirect to signup
+      if (err.response?.status === 400 && errorData?.message === 'User not found') {
+        navigate('/signup');
+        return;
+      }
       if (errorData?.requiresVerification) {
         setLoginError('⚠️ ' + errorData.message);
       } else if (errorData?.googleOnly) {

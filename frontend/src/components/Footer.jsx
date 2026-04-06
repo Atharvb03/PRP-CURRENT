@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useTheme } from '../context/ThemeContext';
+import Logo from './Logo';
 
 function Footer() {
   const [openSection, setOpenSection] = useState(null);
@@ -24,15 +25,7 @@ function Footer() {
           {/* Brand */}
           <div>
             <div className="flex items-center gap-3 mb-4">
-              <div
-                className="w-8 h-8 rounded-lg flex items-center justify-center"
-                style={{ background: 'linear-gradient(135deg, #ec4899, #a855f7)', boxShadow: '0 0 14px rgba(236,72,153,0.4)' }}
-              >
-                <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z" />
-                </svg>
-              </div>
-              <span className="font-bold text-sm" style={{ color: 'var(--text-primary)' }}>PROJECT REVIEW PLATFORM</span>
+              <Logo variant="full" size={32} />
             </div>
             <p className={`text-sm leading-relaxed ${textSub}`}>
               Empowering students and mentors to collaborate, review, and build better academic projects together.
@@ -68,22 +61,39 @@ function Footer() {
               </svg>
             </button>
             {openSection === 'contact' && (
-              <div className={`space-y-3 text-sm ${textSub}`}>
-                <div>
-                  <p className="font-medium" style={{ color: 'var(--text-secondary)' }}>Atharv Bendkhale</p>
-                  <p>📞 8446379837</p>
-                  <p>📧 atharvb03@gmail.com</p>
-                </div>
-                <div>
-                  <p className="font-medium" style={{ color: 'var(--text-secondary)' }}>Raj Kadu</p>
-                  <p>📞 8261825587</p>
-                  <p>📧 rajkadu2700@gmail.com</p>
-                </div>
-                <div>
-                  <p className="font-medium" style={{ color: 'var(--text-secondary)' }}>Prathamesh Pabe</p>
-                  <p>📞 9503583713</p>
-                  <p>📧 prathameshpabe@gmail.com</p>
-                </div>
+              <div className="space-y-4">
+                {[
+                  { name: 'Atharv Bendkhale', phone: '8446379837', email: 'atharvb03@gmail.com', initials: 'AB' },
+                  { name: 'Raj Kadu',         phone: '8261825587', email: 'rajkadu2700@gmail.com', initials: 'RK' },
+                  { name: 'Prathamesh Pabe',  phone: '9503583713', email: 'prathameshpabe@gmail.com', initials: 'PP' },
+                ].map((c) => (
+                  <div key={c.email} className="flex items-start gap-3 p-3 rounded-xl transition-all"
+                    style={{ background: dark ? 'rgba(236,72,153,0.05)' : 'rgba(236,72,153,0.04)', border: '1px solid rgba(236,72,153,0.12)' }}>
+                    <div className="w-8 h-8 rounded-full shrink-0 flex items-center justify-center text-xs font-bold text-white"
+                      style={{ background: 'linear-gradient(135deg,#ff4ecd,#a855f7)' }}>
+                      {c.initials}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold mb-1" style={{ color: 'var(--text-primary)' }}>{c.name}</p>
+                      <a href={`tel:${c.phone}`}
+                        className="flex items-center gap-1 text-xs mb-0.5 transition-colors hover:text-pink-400"
+                        style={{ color: dark ? '#c084fc' : '#7c3aed' }}>
+                        <svg className="w-3 h-3 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.01-.24c1.12.37 2.33.57 3.58.57a1 1 0 011 1V20a1 1 0 01-1 1C10.61 21 3 13.39 3 4a1 1 0 011-1h3.5a1 1 0 011 1c0 1.25.2 2.46.57 3.58a1 1 0 01-.25 1.01l-2.2 2.2z"/>
+                        </svg>
+                        {c.phone}
+                      </a>
+                      <a href={`mailto:${c.email}`}
+                        className="flex items-center gap-1 text-xs transition-colors hover:text-pink-400 truncate"
+                        style={{ color: dark ? '#c084fc' : '#7c3aed' }}>
+                        <svg className="w-3 h-3 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M20 4H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V6a2 2 0 00-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
+                        </svg>
+                        {c.email}
+                      </a>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>

@@ -604,7 +604,7 @@ export default function MenteeDashboard() {
           ) : (
             <div className="flex items-center justify-between mb-2">
               <p className="text-xs truncate max-w-[120px]" style={{ color: 'var(--text-secondary)' }}>📁 {projectName || 'No project set'}</p>
-              {projectStatus !== 'assigned' && !projectFinalRemark && !isProjectArchived && (
+              {!!projectName && projectStatus !== 'assigned' && !projectFinalRemark && !isProjectArchived && (
                 <button onClick={() => { setEditingProject(true); setNewProjectName(projectName); }}
                   className="text-xs px-2 py-0.5 rounded-lg"
                   style={{ background: 'rgba(236,72,153,0.1)', color: '#f472b6' }}>Edit</button>

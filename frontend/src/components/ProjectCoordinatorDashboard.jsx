@@ -1,8 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import axios from '../api/axiosInstance';
 import { useTheme } from '../context/ThemeContext';
 import { logout } from '../utils/auth';
 import { getAllowedPhases, PHASE_CONFIG } from '../utils/phases';
+import { SkeletonList, SkeletonTable, RefreshIndicator } from './Skeleton';
+import Pagination from './Pagination';
 
 import { API } from '../config';
 
@@ -45,6 +47,24 @@ export default function ProjectCoordinatorDashboard() {
   const [msg, setMsg] = useState(null);
   const [dashData, setDashData] = useState(null);
   const [dashLoading, setDashLoading] = useState(false);
+
+  // Skeleton: true only on first load; false on background refresh
+  const [menteesFirstLoad, setMenteesFirstLoad]             = useState(true);
+  const [assignmentsFirstLoad, setAssignmentsFirstLoad]     = useState(true);
+  const [menteesRefreshing, setMenteesRefreshing]           = useState(false);
+  const [assignmentsRefreshing, setAssignmentsRefreshing]   = useState(false);
+  const [menteesError, setMenteesError]                     = useState(null);
+  const [assignmentsError, setAssignmentsError]             = useState(null);
+  // Pagination — mentees
+  const [menteesPage, setMenteesPage]                       = useState(1);
+  const [menteesTotalPages, setMenteesTotalPages]           = useState(1);
+  const [menteesTotalRecords, setMenteesTotalRecords]       = useState(0);
+  const MENTEES_LIMIT = 20;
+  // Pagination — assignments
+  const [assignmentsPage, setAssignmentsPage]               = useState(1);
+  const [assignmentsTotalPages, setAssignmentsTotalPages]   = useState(1);
+  const [assignmentsTotalRecords, setAssignmentsTotalRecords] = useState(0);
+  const ASSIGNMENTS_LIMIT = 20;
 
   // Batch management
   const [batches, setBatches] = useState([]);
@@ -157,19 +177,50 @@ export default function ProjectCoordinatorDashboard() {
   const fetchProjects = () =>
     axios.get(`${API}/hod/project-details`).then(r => setProjects(r.data.data || [])).catch(() => {});
 
+  const fetchMentees = useCallback((page = 1, isRefresh = true) => {
+    if (isRefresh) setMenteesRefreshing(true);
+    else setMenteesFirstLoad(true);
+    setMenteesError(null);
+    return axios.get(`${API}/mentees?page=${page}&limit=${MENTEES_LIMIT}`)
+      .then(r => {
+        setMentees(r.data.data || []);
+        setMenteesPage(r.data.currentPage || page);
+        setMenteesTotalPages(r.data.totalPages || 1);
+        setMenteesTotalRecords(r.data.totalRecords || 0);
+      })
+      .catch(() => setMenteesError('Failed to load mentees. Please try again.'))
+      .finally(() => {
+        setMenteesFirstLoad(false);
+        setMenteesRefreshing(false);
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fetchAssignments = useCallback((page = 1, isRefresh = true) => {
+    if (isRefresh) setAssignmentsRefreshing(true);
+    else setAssignmentsFirstLoad(true);
+    setAssignmentsError(null);
+    return axios.get(`${API}/assignments?page=${page}&limit=${ASSIGNMENTS_LIMIT}`)
+      .then(r => {
+        setAssignments(r.data.data || []);
+        setAssignmentsPage(r.data.currentPage || page);
+        setAssignmentsTotalPages(r.data.totalPages || 1);
+        setAssignmentsTotalRecords(r.data.totalRecords || 0);
+      })
+      .catch(() => setAssignmentsError('Failed to load assignments. Please try again.'))
+      .finally(() => {
+        setAssignmentsFirstLoad(false);
+        setAssignmentsRefreshing(false);
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Mount: fetch all data once
   useEffect(() => {
     axios.get(`${API}/mentors`).then(r => setMentors(r.data.data || [])).catch(() => {});
-    axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+    fetchMentees(1, false);
     fetchProjects();
-    fetchAssignments();
+    fetchAssignments(1, false);
     fetchBatches();
-  }, []);
-
-  const fetchAssignments = () => {
-    return axios.get(`${API}/assignments`).then(r => {
-      setAssignments(r.data.data || []);
-    }).catch(() => {});
-  };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchBatches = () => {
     // Timeout fallback — if API takes >8s, default to batches tab
@@ -273,16 +324,14 @@ export default function ProjectCoordinatorDashboard() {
       setForm({ menteeEmail: '', mentorEmail: '', duration: '6_months' });
       // Refresh data and switch back to mentees tab to show updated status
       const [menteesRes] = await Promise.all([
-        axios.get(`${API}/mentees`).catch(() => null),
-        fetchAssignments(),
+        fetchMentees(1, true),
+        fetchAssignments(1, true),
       ]);
-      if (menteesRes) setMentees(menteesRes.data.data || []);
       setTab('mentees');
     } catch (err) {
       flash(err.response?.data?.message || 'Failed to create assignment.', 'error');
       // Always refresh mentees to keep status in sync (handles 409 case where assignment already exists)
-      const res2 = await axios.get(`${API}/mentees`).catch(() => null);
-      if (res2) setMentees(res2.data.data || []);
+      await fetchMentees(menteesPage, true);
     } finally {
       setLoading(false);
     }
@@ -293,7 +342,7 @@ export default function ProjectCoordinatorDashboard() {
     try {
       await axios.patch(`${API}/coordinator/project-status`, { menteeEmail, status });
       flash(`Project ${status}!`, 'success');
-      axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+      fetchMentees(menteesPage, true);
     } catch (err) {
       flash(err.response?.data?.message || 'Action failed.', 'error');
     } finally {
@@ -306,7 +355,7 @@ export default function ProjectCoordinatorDashboard() {
     try {
       await axios.delete(`${API}/users/${encodeURIComponent(email)}`);
       flash(`User ${email} removed.`, 'success');
-      axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+      fetchMentees(menteesPage, true);
       axios.get(`${API}/mentors`).then(r => setMentors(r.data.data || [])).catch(() => {});
     } catch (err) {
       flash(err.response?.data?.message || 'Failed to remove user.', 'error');
@@ -321,7 +370,7 @@ export default function ProjectCoordinatorDashboard() {
       await axios.put(`${API}/assignments/${editId}`, editForm);
       flash('Assignment updated!', 'success');
       setEditId(''); setEditForm({ projectName: '', mentorEmail: '', duration: '' });
-      fetchAssignments();
+      fetchAssignments(assignmentsPage, true);
     } catch (err) {
       flash(err.response?.data?.message || 'Update failed.', 'error');
     } finally {
@@ -373,8 +422,8 @@ export default function ProjectCoordinatorDashboard() {
       const r = await axios.post(`${API}/assignments/bulk-csv`, { rows: csvRows });
       setBulkResults(r.data);
       setCsvRows([]);
-      fetchAssignments();
-      axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+      fetchAssignments(1, true);
+      fetchMentees(1, true);
     } catch (err) {
       flash(err.response?.data?.message || 'Bulk assign failed.', 'error');
     } finally {
@@ -607,7 +656,26 @@ export default function ProjectCoordinatorDashboard() {
           {/* ── MENTEES TAB ── */}
           {tab === 'mentees' && (
             <div className="space-y-3">
-              {mentees.length === 0 ? (
+              {/* Header row: title + refresh indicator */}
+              <div className="flex items-center justify-between">
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {menteesTotalRecords > 0 ? `${menteesTotalRecords} mentee(s) total` : ''}
+                </p>
+                {menteesRefreshing && <RefreshIndicator />}
+              </div>
+
+              {/* Error state */}
+              {menteesError && !menteesFirstLoad && (
+                <div className="glass rounded-2xl p-5 text-center" style={{ border: '1px solid rgba(239,68,68,0.2)' }}>
+                  <p className="text-sm" style={{ color: '#f87171' }}>⚠️ {menteesError}</p>
+                  <button onClick={() => fetchMentees(menteesPage, true)} className="mt-3 text-xs px-3 py-1.5 rounded-lg" style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}>Retry</button>
+                </div>
+              )}
+
+              {/* Skeleton on first load */}
+              {menteesFirstLoad ? (
+                <SkeletonList count={5} />
+              ) : mentees.length === 0 && !menteesError ? (
                 <div className="glass rounded-2xl p-10 text-center" style={{ border: '1px solid rgba(236,72,153,0.1)' }}>
                   <p className="text-4xl mb-3">👥</p>
                   <p style={{ color: 'var(--text-muted)' }}>No mentees registered yet.</p>
@@ -719,6 +787,16 @@ export default function ProjectCoordinatorDashboard() {
                   </div>
                 );
               })}
+
+              {/* Pagination for mentees */}
+              <Pagination
+                currentPage={menteesPage}
+                totalPages={menteesTotalPages}
+                totalRecords={menteesTotalRecords}
+                limit={MENTEES_LIMIT}
+                loading={menteesRefreshing}
+                onPageChange={(p) => { setMenteesPage(p); fetchMentees(p, true); }}
+              />
             </div>
           )}
 
@@ -728,19 +806,31 @@ export default function ProjectCoordinatorDashboard() {
               style={{ border: '1px solid rgba(236,72,153,0.12)', boxShadow: '0 0 40px rgba(236,72,153,0.06)' }}>
 
               <Field label="Select Mentee">
-                <select className={inputCls} value={form.menteeEmail} onChange={e => {
-                  const selectedMentee = mentees.find(m => m.email === e.target.value);
-                  const menteeDuration = selectedMentee?.projectDuration || '6_months';
-                  setForm({ ...form, menteeEmail: e.target.value, duration: menteeDuration });
-                }}>
-                  <option value="">-- Choose Mentee --</option>
-                  {mentees
-                    .filter(m => m.projectStatus === 'approved')
-                    .filter(m => !assignments.find(a => a.menteeEmail === m.email && a.finalRemark))
-                    .map(m => (
-                      <option key={m.email} value={m.email}>{m.name || m.email} — {m.projectName}</option>
-                    ))}
-                </select>
+                {menteesFirstLoad ? (
+                  <div className="input-custom w-full px-3 py-2.5 rounded-xl text-sm flex items-center gap-2" style={{ opacity: 0.6 }}>
+                    <div className="w-3 h-3 rounded-full border border-t-transparent animate-spin shrink-0" style={{ borderColor: '#ec4899', borderTopColor: 'transparent' }} />
+                    <span style={{ color: 'var(--text-muted)' }}>Loading mentees...</span>
+                  </div>
+                ) : (
+                  <select className={inputCls} value={form.menteeEmail} disabled={menteesRefreshing} onChange={e => {
+                    const selectedMentee = mentees.find(m => m.email === e.target.value);
+                    const menteeDuration = selectedMentee?.projectDuration || '6_months';
+                    setForm({ ...form, menteeEmail: e.target.value, duration: menteeDuration });
+                  }}>
+                    <option value="">-- Choose Mentee --</option>
+                    {mentees
+                      .filter(m => m.projectStatus === 'approved')
+                      .filter(m => !assignments.find(a => a.menteeEmail === m.email && a.finalRemark))
+                      .map(m => (
+                        <option key={m.email} value={m.email}>{m.name || m.email} — {m.projectName}</option>
+                      ))}
+                  </select>
+                )}
+                {menteesTotalPages > 1 && (
+                  <p className="text-xs mt-1" style={{ color: '#f59e0b' }}>
+                    ⚠ Showing page {menteesPage} of {menteesTotalPages}. Navigate pages in Mentees & Projects tab.
+                  </p>
+                )}
               </Field>
 
               {form.menteeEmail && (
@@ -938,7 +1028,26 @@ student2@college.com,mentor2@college.com,1_year`}
           {/* ── LIST TAB ── */}
           {tab === 'list' && (
             <div className="space-y-3">
-              {assignments.length === 0 ? (
+              {/* Header row */}
+              <div className="flex items-center justify-between">
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {assignmentsTotalRecords > 0 ? `${assignmentsTotalRecords} assignment(s) total` : ''}
+                </p>
+                {assignmentsRefreshing && <RefreshIndicator />}
+              </div>
+
+              {/* Error state */}
+              {assignmentsError && !assignmentsFirstLoad && (
+                <div className="glass rounded-2xl p-5 text-center" style={{ border: '1px solid rgba(239,68,68,0.2)' }}>
+                  <p className="text-sm" style={{ color: '#f87171' }}>⚠️ {assignmentsError}</p>
+                  <button onClick={() => fetchAssignments(assignmentsPage, true)} className="mt-3 text-xs px-3 py-1.5 rounded-lg" style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}>Retry</button>
+                </div>
+              )}
+
+              {/* Skeleton on first load */}
+              {assignmentsFirstLoad ? (
+                <SkeletonList count={5} />
+              ) : assignments.length === 0 && !assignmentsError ? (
                 <div className="glass rounded-2xl p-10 text-center" style={{ border: '1px solid rgba(236,72,153,0.1)' }}>
                   <p className="text-4xl mb-3">📭</p>
                   <p style={{ color: 'var(--text-muted)' }}>No assignments yet. Create one first.</p>
@@ -999,6 +1108,16 @@ student2@college.com,mentor2@college.com,1_year`}
                   </button>
                 </div>
               ))}
+
+              {/* Pagination for assignments */}
+              <Pagination
+                currentPage={assignmentsPage}
+                totalPages={assignmentsTotalPages}
+                totalRecords={assignmentsTotalRecords}
+                limit={ASSIGNMENTS_LIMIT}
+                loading={assignmentsRefreshing}
+                onPageChange={(p) => { setAssignmentsPage(p); fetchAssignments(p, true); }}
+              />
             </div>
           )}
 
@@ -1008,25 +1127,38 @@ student2@college.com,mentor2@college.com,1_year`}
               style={{ border: '1px solid rgba(236,72,153,0.12)', boxShadow: '0 0 40px rgba(236,72,153,0.06)' }}>
 
               <Field label="Select Assignment to Update">
-                <select
-                  className={inputCls}
-                  value={editId}
-                  onChange={e => {
-                    const a = assignments.find(x => x._id === e.target.value);
-                    setEditId(e.target.value);
-                    if (a) setEditForm({ projectName: a.projectName, mentorEmail: a.mentorEmail, duration: a.duration || '' });
-                  }}
-                >
-                  <option value="">-- Choose Assignment --</option>
-                  {assignments
-                    .filter(a => !a.finalRemark)
-                    .map(a => {
-                      const mentee = mentees.find(m => m.email === a.menteeEmail);
-                      return (
-                        <option key={a._id} value={a._id}>{a.projectName} ({mentee?.name || a.menteeEmail})</option>
-                      );
-                    })}
-                </select>
+                {assignmentsFirstLoad ? (
+                  <div className="input-custom w-full px-3 py-2.5 rounded-xl text-sm flex items-center gap-2" style={{ opacity: 0.6 }}>
+                    <div className="w-3 h-3 rounded-full border border-t-transparent animate-spin shrink-0" style={{ borderColor: '#ec4899', borderTopColor: 'transparent' }} />
+                    <span style={{ color: 'var(--text-muted)' }}>Loading assignments...</span>
+                  </div>
+                ) : (
+                  <select
+                    className={inputCls}
+                    value={editId}
+                    disabled={assignmentsRefreshing}
+                    onChange={e => {
+                      const a = assignments.find(x => x._id === e.target.value);
+                      setEditId(e.target.value);
+                      if (a) setEditForm({ projectName: a.projectName, mentorEmail: a.mentorEmail, duration: a.duration || '' });
+                    }}
+                  >
+                    <option value="">-- Choose Assignment --</option>
+                    {assignments
+                      .filter(a => !a.finalRemark)
+                      .map(a => {
+                        const mentee = mentees.find(m => m.email === a.menteeEmail);
+                        return (
+                          <option key={a._id} value={a._id}>{a.projectName} ({mentee?.name || a.menteeEmail})</option>
+                        );
+                      })}
+                  </select>
+                )}
+                {assignmentsTotalPages > 1 && (
+                  <p className="text-xs mt-1" style={{ color: '#f59e0b' }}>
+                    ⚠ Showing page {assignmentsPage} of {assignmentsTotalPages}. Use All Assignments tab to browse other pages.
+                  </p>
+                )}
               </Field>
 
               <Field label="New Project Name (optional)">
@@ -1110,7 +1242,7 @@ student2@college.com,mentor2@college.com,1_year`}
                     try {
                       const res = await axios.post(`${API}/admin/repair-completed-files`);
                       flash(res.data.message, 'success');
-                      axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+                      fetchMentees(1, true);
                     } catch (err) {
                       flash(err.response?.data?.message || 'Repair failed', 'error');
                     }
