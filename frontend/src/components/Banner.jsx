@@ -1,13 +1,8 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
-
-const stats = [
-  { value: '500+', label: 'Projects Reviewed' },
-  { value: '120+', label: 'Active Mentors' },
-  { value: '1.2k+', label: 'Students' },
-  { value: '98%', label: 'Satisfaction Rate' },
-];
+import { API_BASE } from '../config';
+import Logo from './Logo';
 
 const features = [
   {
@@ -32,9 +27,60 @@ const features = [
   },
 ];
 
+// Animate a number from 0 to target
+function useCountUp(target, duration = 1200) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (!target) return;
+    let start = 0;
+    const step = Math.ceil(target / (duration / 16));
+    const timer = setInterval(() => {
+      start += step;
+      if (start >= target) { setValue(target); clearInterval(timer); }
+      else setValue(start);
+    }, 16);
+    return () => clearInterval(timer);
+  }, [target, duration]);
+  return value;
+}
+
+function StatCard({ value, label, loading, bodyText, statCard }) {
+  const animated = useCountUp(loading ? 0 : value);
+  return (
+    <div className={`rounded-2xl p-5 text-center transition-all ${statCard}`}>
+      {loading ? (
+        <div className="h-9 w-16 mx-auto rounded-lg mb-1"
+          style={{ background: 'rgba(236,72,153,0.1)', animation: 'prp-shimmer 1.4s infinite', backgroundSize: '200% 100%' }} />
+      ) : (
+        <div className="text-3xl font-extrabold gradient-text">
+          {animated}{value >= 10 ? '+' : ''}
+        </div>
+      )}
+      <div className={`text-sm mt-1 ${bodyText}`}>{label}</div>
+    </div>
+  );
+}
+
 function Banner() {
   const navigate = useNavigate();
   const { dark } = useTheme();
+  const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/public/stats`)
+      .then(r => r.json())
+      .then(d => { if (d.success) setStats(d.data); })
+      .catch(() => {})
+      .finally(() => setStatsLoading(false));
+  }, []);
+
+  const statItems = [
+    { value: stats?.mentees   || 0, label: 'Registered Students' },
+    { value: stats?.mentors   || 0, label: 'Active Mentors' },
+    { value: stats?.completedProjects || 0, label: 'Projects Completed' },
+    { value: stats?.filesSubmitted    || 0, label: 'Files Submitted' },
+  ];
 
   const cardClass = dark
     ? 'glass border border-pink-500/10 hover:border-pink-500/30'
@@ -97,13 +143,17 @@ function Banner() {
           </div>
         </div>
 
-        {/* Stats */}
+        {/* Stats — live from DB */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-20 max-w-3xl mx-auto">
-          {stats.map((s) => (
-            <div key={s.label} className={`rounded-2xl p-5 text-center transition-all ${statCard}`}>
-              <div className="text-3xl font-extrabold gradient-text">{s.value}</div>
-              <div className={`text-sm mt-1 ${bodyText}`}>{s.label}</div>
-            </div>
+          {statItems.map((s) => (
+            <StatCard
+              key={s.label}
+              value={s.value}
+              label={s.label}
+              loading={statsLoading}
+              bodyText={bodyText}
+              statCard={statCard}
+            />
           ))}
         </div>
       </section>

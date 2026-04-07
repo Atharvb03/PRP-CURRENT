@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 
-const API = 'http://localhost:5000/api';
+import { API } from '../config';
 
 const ROLES = [
   { value: 'mentee',              label: 'Mentee',              icon: '📚', desc: 'Submit and get feedback on projects', requiresCode: false },
@@ -54,7 +54,12 @@ function CompleteProfile() {
       } else {
         setChecking(false);
       }
-    }).catch(() => {
+    }).catch((err) => {
+      // 403 with needsProfile = valid pending token, just stay on this page
+      if (err.response?.status === 403 && err.response?.data?.needsProfile) {
+        setChecking(false);
+        return;
+      }
       localStorage.removeItem('token');
       navigate('/login', { replace: true });
     });

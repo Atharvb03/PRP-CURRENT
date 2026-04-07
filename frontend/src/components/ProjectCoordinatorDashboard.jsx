@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import axios from '../api/axiosInstance';
 import { useTheme } from '../context/ThemeContext';
 import { logout } from '../utils/auth';
 import { getAllowedPhases, PHASE_CONFIG } from '../utils/phases';
+import { SkeletonList, SkeletonTable, RefreshIndicator } from './Skeleton';
+import Pagination from './Pagination';
 
-const API = 'http://localhost:5000/api';
+import { API } from '../config';
 
 // Reusable styled input/select for the dark/light theme
 function Field({ label, children }) {
@@ -45,6 +47,24 @@ export default function ProjectCoordinatorDashboard() {
   const [msg, setMsg] = useState(null);
   const [dashData, setDashData] = useState(null);
   const [dashLoading, setDashLoading] = useState(false);
+
+  // Skeleton: true only on first load; false on background refresh
+  const [menteesFirstLoad, setMenteesFirstLoad]             = useState(true);
+  const [assignmentsFirstLoad, setAssignmentsFirstLoad]     = useState(true);
+  const [menteesRefreshing, setMenteesRefreshing]           = useState(false);
+  const [assignmentsRefreshing, setAssignmentsRefreshing]   = useState(false);
+  const [menteesError, setMenteesError]                     = useState(null);
+  const [assignmentsError, setAssignmentsError]             = useState(null);
+  // Pagination — mentees
+  const [menteesPage, setMenteesPage]                       = useState(1);
+  const [menteesTotalPages, setMenteesTotalPages]           = useState(1);
+  const [menteesTotalRecords, setMenteesTotalRecords]       = useState(0);
+  const MENTEES_LIMIT = 20;
+  // Pagination — assignments
+  const [assignmentsPage, setAssignmentsPage]               = useState(1);
+  const [assignmentsTotalPages, setAssignmentsTotalPages]   = useState(1);
+  const [assignmentsTotalRecords, setAssignmentsTotalRecords] = useState(0);
+  const ASSIGNMENTS_LIMIT = 20;
 
   // Batch management
   const [batches, setBatches] = useState([]);
@@ -105,18 +125,16 @@ export default function ProjectCoordinatorDashboard() {
     if (!menteeEmail || menteeFiles[cacheKey] !== undefined) return;
     setFilesLoading(menteeEmail);
     try {
-      // Build URL with projectName filter for archived projects
+      // Build URL with projectName filter for archived/completed projects
       let url = `${API}/files/metadata/${menteeEmail}`;
-      if (project?.isArchived) {
-        // For archived projects, filter by specific project name
+      if (project?.isArchived || project?.finalRemark) {
         url += `?projectName=${encodeURIComponent(project.projectName)}`;
       }
       
       const res = await axios.get(url);
       const map = {};
-      // If project is archived, use archived files; otherwise use active files
-      // Note: finalRemark alone doesn't mean files are archived - they're only archived when mentee creates new project
-      const filesToDisplay = project?.isArchived
+      // If project is archived OR has finalRemark (completed), use archived files
+      const filesToDisplay = (project?.isArchived || project?.finalRemark)
         ? (res.data.archivedFiles || [])
         : (res.data.data || []);
       
@@ -159,19 +177,50 @@ export default function ProjectCoordinatorDashboard() {
   const fetchProjects = () =>
     axios.get(`${API}/hod/project-details`).then(r => setProjects(r.data.data || [])).catch(() => {});
 
+  const fetchMentees = useCallback((page = 1, isRefresh = true) => {
+    if (isRefresh) setMenteesRefreshing(true);
+    else setMenteesFirstLoad(true);
+    setMenteesError(null);
+    return axios.get(`${API}/mentees?page=${page}&limit=${MENTEES_LIMIT}`)
+      .then(r => {
+        setMentees(r.data.data || []);
+        setMenteesPage(r.data.currentPage || page);
+        setMenteesTotalPages(r.data.totalPages || 1);
+        setMenteesTotalRecords(r.data.totalRecords || 0);
+      })
+      .catch(() => setMenteesError('Failed to load mentees. Please try again.'))
+      .finally(() => {
+        setMenteesFirstLoad(false);
+        setMenteesRefreshing(false);
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fetchAssignments = useCallback((page = 1, isRefresh = true) => {
+    if (isRefresh) setAssignmentsRefreshing(true);
+    else setAssignmentsFirstLoad(true);
+    setAssignmentsError(null);
+    return axios.get(`${API}/assignments?page=${page}&limit=${ASSIGNMENTS_LIMIT}`)
+      .then(r => {
+        setAssignments(r.data.data || []);
+        setAssignmentsPage(r.data.currentPage || page);
+        setAssignmentsTotalPages(r.data.totalPages || 1);
+        setAssignmentsTotalRecords(r.data.totalRecords || 0);
+      })
+      .catch(() => setAssignmentsError('Failed to load assignments. Please try again.'))
+      .finally(() => {
+        setAssignmentsFirstLoad(false);
+        setAssignmentsRefreshing(false);
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Mount: fetch all data once
   useEffect(() => {
     axios.get(`${API}/mentors`).then(r => setMentors(r.data.data || [])).catch(() => {});
-    axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+    fetchMentees(1, false);
     fetchProjects();
-    fetchAssignments();
+    fetchAssignments(1, false);
     fetchBatches();
-  }, []);
-
-  const fetchAssignments = () => {
-    return axios.get(`${API}/assignments`).then(r => {
-      setAssignments(r.data.data || []);
-    }).catch(() => {});
-  };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchBatches = () => {
     // Timeout fallback — if API takes >8s, default to batches tab
@@ -188,7 +237,7 @@ export default function ProjectCoordinatorDashboard() {
       setBatches(batchList);
 
       const active = batchList.find(b => b.isActive);
-      if (active) setActiveBatch(active.name);
+      if (active) setActiveBatch(active);
 
       if (!initialTabSetRef.current) {
         initialTabSetRef.current = true;
@@ -275,16 +324,14 @@ export default function ProjectCoordinatorDashboard() {
       setForm({ menteeEmail: '', mentorEmail: '', duration: '6_months' });
       // Refresh data and switch back to mentees tab to show updated status
       const [menteesRes] = await Promise.all([
-        axios.get(`${API}/mentees`).catch(() => null),
-        fetchAssignments(),
+        fetchMentees(1, true),
+        fetchAssignments(1, true),
       ]);
-      if (menteesRes) setMentees(menteesRes.data.data || []);
       setTab('mentees');
     } catch (err) {
       flash(err.response?.data?.message || 'Failed to create assignment.', 'error');
       // Always refresh mentees to keep status in sync (handles 409 case where assignment already exists)
-      const res2 = await axios.get(`${API}/mentees`).catch(() => null);
-      if (res2) setMentees(res2.data.data || []);
+      await fetchMentees(menteesPage, true);
     } finally {
       setLoading(false);
     }
@@ -295,7 +342,7 @@ export default function ProjectCoordinatorDashboard() {
     try {
       await axios.patch(`${API}/coordinator/project-status`, { menteeEmail, status });
       flash(`Project ${status}!`, 'success');
-      axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+      fetchMentees(menteesPage, true);
     } catch (err) {
       flash(err.response?.data?.message || 'Action failed.', 'error');
     } finally {
@@ -308,7 +355,7 @@ export default function ProjectCoordinatorDashboard() {
     try {
       await axios.delete(`${API}/users/${encodeURIComponent(email)}`);
       flash(`User ${email} removed.`, 'success');
-      axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+      fetchMentees(menteesPage, true);
       axios.get(`${API}/mentors`).then(r => setMentors(r.data.data || [])).catch(() => {});
     } catch (err) {
       flash(err.response?.data?.message || 'Failed to remove user.', 'error');
@@ -323,7 +370,7 @@ export default function ProjectCoordinatorDashboard() {
       await axios.put(`${API}/assignments/${editId}`, editForm);
       flash('Assignment updated!', 'success');
       setEditId(''); setEditForm({ projectName: '', mentorEmail: '', duration: '' });
-      fetchAssignments();
+      fetchAssignments(assignmentsPage, true);
     } catch (err) {
       flash(err.response?.data?.message || 'Update failed.', 'error');
     } finally {
@@ -375,8 +422,8 @@ export default function ProjectCoordinatorDashboard() {
       const r = await axios.post(`${API}/assignments/bulk-csv`, { rows: csvRows });
       setBulkResults(r.data);
       setCsvRows([]);
-      fetchAssignments();
-      axios.get(`${API}/mentees`).then(r => setMentees(r.data.data || [])).catch(() => {});
+      fetchAssignments(1, true);
+      fetchMentees(1, true);
     } catch (err) {
       flash(err.response?.data?.message || 'Bulk assign failed.', 'error');
     } finally {
@@ -442,7 +489,7 @@ export default function ProjectCoordinatorDashboard() {
           <div className="rounded-xl p-3 mb-2"
             style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.15)' }}>
             <p className="text-xs font-semibold mb-1" style={{ color: '#818cf8' }}>📅 Active Academic Year</p>
-            <p className="text-xs font-bold" style={{ color: 'var(--text-primary)' }}>{activeBatch}</p>
+            <p className="text-xs font-bold" style={{ color: 'var(--text-primary)' }}>{activeBatch?.name || activeBatch}</p>
           </div>
         )}
 
@@ -609,13 +656,35 @@ export default function ProjectCoordinatorDashboard() {
           {/* ── MENTEES TAB ── */}
           {tab === 'mentees' && (
             <div className="space-y-3">
-              {mentees.length === 0 ? (
+              {/* Header row: title + refresh indicator */}
+              <div className="flex items-center justify-between">
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {menteesTotalRecords > 0 ? `${menteesTotalRecords} mentee(s) total` : ''}
+                </p>
+                {menteesRefreshing && <RefreshIndicator />}
+              </div>
+
+              {/* Error state */}
+              {menteesError && !menteesFirstLoad && (
+                <div className="glass rounded-2xl p-5 text-center" style={{ border: '1px solid rgba(239,68,68,0.2)' }}>
+                  <p className="text-sm" style={{ color: '#f87171' }}>⚠️ {menteesError}</p>
+                  <button onClick={() => fetchMentees(menteesPage, true)} className="mt-3 text-xs px-3 py-1.5 rounded-lg" style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}>Retry</button>
+                </div>
+              )}
+
+              {/* Skeleton on first load */}
+              {menteesFirstLoad ? (
+                <SkeletonList count={5} />
+              ) : mentees.length === 0 && !menteesError ? (
                 <div className="glass rounded-2xl p-10 text-center" style={{ border: '1px solid rgba(236,72,153,0.1)' }}>
                   <p className="text-4xl mb-3">👥</p>
                   <p style={{ color: 'var(--text-muted)' }}>No mentees registered yet.</p>
                 </div>
               ) : mentees.map((m) => {
                 const status = m.projectStatus || 'pending';
+                // Check if this mentee's CURRENT (non-archived) assignment is finalised
+                const isFinalised = assignments.some(a => a.menteeEmail === m.email && a.finalRemark && !a.isArchived);
+
                 const statusColor = status === 'assigned' ? '#10b981' : status === 'approved' ? '#818cf8' : status === 'rejected' ? '#f87171' : '#f59e0b';
                 const statusBg = status === 'assigned' ? 'rgba(16,185,129,0.1)' : status === 'approved' ? 'rgba(99,102,241,0.1)' : status === 'rejected' ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.1)';
                 return (
@@ -646,9 +715,30 @@ export default function ProjectCoordinatorDashboard() {
                             </div>
                           </div>
                         )}
+                        {/* Past completed projects from archived assignments */}
+                        {(() => {
+                          const past = assignments.filter(a => a.isArchived && a.menteeEmail === m.email);
+                          if (!past.length) return null;
+                          return (
+                            <div className="mt-2 pt-2" style={{ borderTop: '1px solid rgba(16,185,129,0.12)' }}>
+                              <p className="text-xs font-semibold mb-1.5" style={{ color: '#10b981' }}>📂 Past Projects</p>
+                              <div className="flex flex-col gap-1">
+                                {past.map((a, i) => (
+                                  <div key={i} className="flex items-center gap-2 text-xs px-2 py-1 rounded-lg"
+                                    style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.1)' }}>
+                                    <span style={{ color: '#10b981' }}>✅</span>
+                                    <span style={{ color: 'var(--text-secondary)' }}>{a.projectName}</span>
+                                    {a.finalRemark && <span style={{ color: 'var(--text-muted)' }}>— {a.finalRemark.length > 25 ? a.finalRemark.slice(0,25)+'…' : a.finalRemark}</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                       <div className="flex gap-2 flex-wrap items-start">
-                        {status !== 'assigned' && (
+                        {/* Hide action buttons when: finalised, assigned, or completed but no new project yet */}
+                        {!isFinalised && status !== 'assigned' && !!m.projectName && (
                           <>
                             {status !== 'approved' && (
                               <button
@@ -672,7 +762,11 @@ export default function ProjectCoordinatorDashboard() {
                               <button
                                 onClick={() => { 
                                   const menteeDuration = m.projectDuration || '6_months';
-                                  setForm({ menteeEmail: m.email, mentorEmail: '', duration: menteeDuration }); 
+                                  const activeBatchId = activeBatch?._id?.toString();
+                                  const is2nd = activeBatchId
+                                    ? projects.some(p => p.mentee?.email === m.email && p.isArchived && p.batchId?.toString() === activeBatchId)
+                                    : false;
+                                  setForm({ menteeEmail: m.email, mentorEmail: '', duration: is2nd ? '6_months' : menteeDuration }); 
                                   setTab('assign'); 
                                 }}
                                 className="px-3 py-1.5 rounded-lg text-xs font-medium"
@@ -693,6 +787,16 @@ export default function ProjectCoordinatorDashboard() {
                   </div>
                 );
               })}
+
+              {/* Pagination for mentees */}
+              <Pagination
+                currentPage={menteesPage}
+                totalPages={menteesTotalPages}
+                totalRecords={menteesTotalRecords}
+                limit={MENTEES_LIMIT}
+                loading={menteesRefreshing}
+                onPageChange={(p) => { setMenteesPage(p); fetchMentees(p, true); }}
+              />
             </div>
           )}
 
@@ -702,19 +806,31 @@ export default function ProjectCoordinatorDashboard() {
               style={{ border: '1px solid rgba(236,72,153,0.12)', boxShadow: '0 0 40px rgba(236,72,153,0.06)' }}>
 
               <Field label="Select Mentee">
-                <select className={inputCls} value={form.menteeEmail} onChange={e => {
-                  const selectedMentee = mentees.find(m => m.email === e.target.value);
-                  const menteeDuration = selectedMentee?.projectDuration || '6_months';
-                  setForm({ ...form, menteeEmail: e.target.value, duration: menteeDuration });
-                }}>
-                  <option value="">-- Choose Mentee --</option>
-                  {mentees
-                    .filter(m => m.projectStatus === 'approved')
-                    .filter(m => !assignments.find(a => a.menteeEmail === m.email && a.finalRemark))
-                    .map(m => (
-                      <option key={m.email} value={m.email}>{m.name || m.email} — {m.projectName}</option>
-                    ))}
-                </select>
+                {menteesFirstLoad ? (
+                  <div className="input-custom w-full px-3 py-2.5 rounded-xl text-sm flex items-center gap-2" style={{ opacity: 0.6 }}>
+                    <div className="w-3 h-3 rounded-full border border-t-transparent animate-spin shrink-0" style={{ borderColor: '#ec4899', borderTopColor: 'transparent' }} />
+                    <span style={{ color: 'var(--text-muted)' }}>Loading mentees...</span>
+                  </div>
+                ) : (
+                  <select className={inputCls} value={form.menteeEmail} disabled={menteesRefreshing} onChange={e => {
+                    const selectedMentee = mentees.find(m => m.email === e.target.value);
+                    const menteeDuration = selectedMentee?.projectDuration || '6_months';
+                    setForm({ ...form, menteeEmail: e.target.value, duration: menteeDuration });
+                  }}>
+                    <option value="">-- Choose Mentee --</option>
+                    {mentees
+                      .filter(m => m.projectStatus === 'approved')
+                      .filter(m => !assignments.find(a => a.menteeEmail === m.email && a.finalRemark))
+                      .map(m => (
+                        <option key={m.email} value={m.email}>{m.name || m.email} — {m.projectName}</option>
+                      ))}
+                  </select>
+                )}
+                {menteesTotalPages > 1 && (
+                  <p className="text-xs mt-1" style={{ color: '#f59e0b' }}>
+                    ⚠ Showing page {menteesPage} of {menteesTotalPages}. Navigate pages in Mentees & Projects tab.
+                  </p>
+                )}
               </Field>
 
               {form.menteeEmail && (
@@ -735,10 +851,30 @@ export default function ProjectCoordinatorDashboard() {
               </Field>
 
               <Field label="Project Duration">
-                <select className={inputCls} value={form.duration} onChange={e => setForm({ ...form, duration: e.target.value })}>
-                  <option value="6_months">6 Months</option>
-                  <option value="1_year">1 Year</option>
-                </select>
+                {(() => {
+                  // Only block 1-year if mentee has archived project IN THE CURRENT active batch
+                  const activeBatchId = activeBatch?._id?.toString();
+                  const is2ndProject = form.menteeEmail && activeBatchId
+                    ? projects.some(p =>
+                        p.mentee?.email === form.menteeEmail &&
+                        p.isArchived &&
+                        p.batchId?.toString() === activeBatchId
+                      )
+                    : false;
+                  return (
+                    <>
+                      <select className={inputCls} value={form.duration} onChange={e => setForm({ ...form, duration: e.target.value })}>
+                        <option value="6_months">6 Months</option>
+                        {!is2ndProject && <option value="1_year">1 Year</option>}
+                      </select>
+                      {is2ndProject && (
+                        <p className="text-xs mt-1" style={{ color: '#f59e0b' }}>
+                          ⚠ 1-year option unavailable — this is the 2nd project in the same academic year.
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </Field>
 
               <button
@@ -892,16 +1028,49 @@ student2@college.com,mentor2@college.com,1_year`}
           {/* ── LIST TAB ── */}
           {tab === 'list' && (
             <div className="space-y-3">
-              {assignments.length === 0 ? (
+              {/* Header row */}
+              <div className="flex items-center justify-between">
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {assignmentsTotalRecords > 0 ? `${assignmentsTotalRecords} assignment(s) total` : ''}
+                </p>
+                {assignmentsRefreshing && <RefreshIndicator />}
+              </div>
+
+              {/* Error state */}
+              {assignmentsError && !assignmentsFirstLoad && (
+                <div className="glass rounded-2xl p-5 text-center" style={{ border: '1px solid rgba(239,68,68,0.2)' }}>
+                  <p className="text-sm" style={{ color: '#f87171' }}>⚠️ {assignmentsError}</p>
+                  <button onClick={() => fetchAssignments(assignmentsPage, true)} className="mt-3 text-xs px-3 py-1.5 rounded-lg" style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}>Retry</button>
+                </div>
+              )}
+
+              {/* Skeleton on first load */}
+              {assignmentsFirstLoad ? (
+                <SkeletonList count={5} />
+              ) : assignments.length === 0 && !assignmentsError ? (
                 <div className="glass rounded-2xl p-10 text-center" style={{ border: '1px solid rgba(236,72,153,0.1)' }}>
                   <p className="text-4xl mb-3">📭</p>
                   <p style={{ color: 'var(--text-muted)' }}>No assignments yet. Create one first.</p>
                 </div>
               ) : assignments.map((a) => (
                 <div key={a._id} className="glass rounded-2xl p-5 flex items-start justify-between gap-4"
-                  style={{ border: '1px solid rgba(236,72,153,0.1)' }}>
+                  style={{ border: `1px solid ${a.isArchived ? 'rgba(16,185,129,0.2)' : 'rgba(236,72,153,0.1)'}` }}>
                   <div className="flex-1 space-y-1">
-                    <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>{a.projectName}</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>{a.projectName}</p>
+                      {a.isArchived && (
+                        <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                          style={{ background: 'rgba(16,185,129,0.12)', color: '#10b981', border: '1px solid rgba(16,185,129,0.2)' }}>
+                          ✅ Completed
+                        </span>
+                      )}
+                      {a.finalRemark && (
+                        <span className="text-xs px-2 py-0.5 rounded-full"
+                          style={{ background: 'rgba(16,185,129,0.08)', color: '#6ee7b7' }}>
+                          "{a.finalRemark.length > 30 ? a.finalRemark.slice(0, 30) + '…' : a.finalRemark}"
+                        </span>
+                      )}
+                    </div>
                     <div className="flex flex-wrap gap-3 text-xs mt-2">
                       <span className="flex items-center gap-1 px-2 py-1 rounded-lg" style={{ background: 'rgba(236,72,153,0.1)', color: '#f472b6' }}>
                         🎓 {a.mentorEmail}
@@ -939,6 +1108,16 @@ student2@college.com,mentor2@college.com,1_year`}
                   </button>
                 </div>
               ))}
+
+              {/* Pagination for assignments */}
+              <Pagination
+                currentPage={assignmentsPage}
+                totalPages={assignmentsTotalPages}
+                totalRecords={assignmentsTotalRecords}
+                limit={ASSIGNMENTS_LIMIT}
+                loading={assignmentsRefreshing}
+                onPageChange={(p) => { setAssignmentsPage(p); fetchAssignments(p, true); }}
+              />
             </div>
           )}
 
@@ -948,25 +1127,38 @@ student2@college.com,mentor2@college.com,1_year`}
               style={{ border: '1px solid rgba(236,72,153,0.12)', boxShadow: '0 0 40px rgba(236,72,153,0.06)' }}>
 
               <Field label="Select Assignment to Update">
-                <select
-                  className={inputCls}
-                  value={editId}
-                  onChange={e => {
-                    const a = assignments.find(x => x._id === e.target.value);
-                    setEditId(e.target.value);
-                    if (a) setEditForm({ projectName: a.projectName, mentorEmail: a.mentorEmail, duration: a.duration || '' });
-                  }}
-                >
-                  <option value="">-- Choose Assignment --</option>
-                  {assignments
-                    .filter(a => !a.finalRemark)
-                    .map(a => {
-                      const mentee = mentees.find(m => m.email === a.menteeEmail);
-                      return (
-                        <option key={a._id} value={a._id}>{a.projectName} ({mentee?.name || a.menteeEmail})</option>
-                      );
-                    })}
-                </select>
+                {assignmentsFirstLoad ? (
+                  <div className="input-custom w-full px-3 py-2.5 rounded-xl text-sm flex items-center gap-2" style={{ opacity: 0.6 }}>
+                    <div className="w-3 h-3 rounded-full border border-t-transparent animate-spin shrink-0" style={{ borderColor: '#ec4899', borderTopColor: 'transparent' }} />
+                    <span style={{ color: 'var(--text-muted)' }}>Loading assignments...</span>
+                  </div>
+                ) : (
+                  <select
+                    className={inputCls}
+                    value={editId}
+                    disabled={assignmentsRefreshing}
+                    onChange={e => {
+                      const a = assignments.find(x => x._id === e.target.value);
+                      setEditId(e.target.value);
+                      if (a) setEditForm({ projectName: a.projectName, mentorEmail: a.mentorEmail, duration: a.duration || '' });
+                    }}
+                  >
+                    <option value="">-- Choose Assignment --</option>
+                    {assignments
+                      .filter(a => !a.finalRemark)
+                      .map(a => {
+                        const mentee = mentees.find(m => m.email === a.menteeEmail);
+                        return (
+                          <option key={a._id} value={a._id}>{a.projectName} ({mentee?.name || a.menteeEmail})</option>
+                        );
+                      })}
+                  </select>
+                )}
+                {assignmentsTotalPages > 1 && (
+                  <p className="text-xs mt-1" style={{ color: '#f59e0b' }}>
+                    ⚠ Showing page {assignmentsPage} of {assignmentsTotalPages}. Use All Assignments tab to browse other pages.
+                  </p>
+                )}
               </Field>
 
               <Field label="New Project Name (optional)">
@@ -986,11 +1178,38 @@ student2@college.com,mentor2@college.com,1_year`}
               </Field>
 
               <Field label="Project Duration (optional)">
-                <select className={inputCls} value={editForm.duration} onChange={e => setEditForm({ ...editForm, duration: e.target.value })}>
-                  <option value="">-- Keep current duration --</option>
-                  <option value="6_months">6 Months</option>
-                  <option value="1_year">1 Year</option>
-                </select>
+                {(() => {
+                  // Only block 1-year if mentee has archived project IN THE CURRENT active batch
+                  const selectedAssignment = assignments.find(a => a._id === editId);
+                  const activeBatchId = activeBatch?._id?.toString();
+                  const is2nd6Month = selectedAssignment && activeBatchId
+                    ? projects.some(p =>
+                        p.mentee?.email === selectedAssignment.menteeEmail &&
+                        p.isArchived &&
+                        p.batchId?.toString() === activeBatchId
+                      )
+                    : false;
+
+                  return (
+                    <select className={inputCls} value={editForm.duration} onChange={e => setEditForm({ ...editForm, duration: e.target.value })}>
+                      <option value="">-- Keep current duration --</option>
+                      <option value="6_months">6 Months</option>
+                      {!is2nd6Month && <option value="1_year">1 Year</option>}
+                    </select>
+                  );
+                })()}
+                {assignments.find(a => a._id === editId) && (() => {
+                  const sel = assignments.find(a => a._id === editId);
+                  const activeBatchId = activeBatch?._id?.toString();
+                  const show = activeBatchId && projects.some(p =>
+                    p.mentee?.email === sel?.menteeEmail && p.isArchived && p.batchId?.toString() === activeBatchId
+                  );
+                  return show ? (
+                    <p className="text-xs mt-1" style={{ color: '#f59e0b' }}>
+                      ⚠ 1-year option unavailable — this is the 2nd project in the same academic year.
+                    </p>
+                  ) : null;
+                })()}
               </Field>
 
               <button
@@ -1009,6 +1228,30 @@ student2@college.com,mentor2@college.com,1_year`}
           {/* ── ACADEMIC YEARS (BATCHES) TAB ── */}
           {tab === 'batches' && (
             <div className="space-y-6">
+              {/* One-time repair tool for existing completed projects */}
+              <div className="glass rounded-2xl p-4 flex items-center justify-between gap-4"
+                style={{ border: '1px solid rgba(245,158,11,0.2)', background: 'rgba(245,158,11,0.04)' }}>
+                <div>
+                  <p className="text-sm font-semibold" style={{ color: '#f59e0b' }}>🔧 Data Repair</p>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    Archive files for mentees whose projects were already finalised by mentor.
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await axios.post(`${API}/admin/repair-completed-files`);
+                      flash(res.data.message, 'success');
+                      fetchMentees(1, true);
+                    } catch (err) {
+                      flash(err.response?.data?.message || 'Repair failed', 'error');
+                    }
+                  }}
+                  className="shrink-0 px-4 py-2 rounded-xl text-xs font-semibold"
+                  style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)' }}>
+                  Run Repair
+                </button>
+              </div>
               {/* Welcome Message for First-Time Setup */}
               {batches.length === 0 && (
                 <div className="glass rounded-2xl p-6" style={{ 
@@ -1177,7 +1420,13 @@ student2@college.com,mentor2@college.com,1_year`}
                 <div className="space-y-3">
                   {/* List all batches */}
                   {batches.map(batch => {
-                    const batchProjects = projects.filter(p => p.batchId?.toString() === batch._id.toString());
+                    // Include projects matching this batch, plus archived projects with no batchId under the active batch
+                    const batchProjects = projects.filter(p => {
+                      if (p.batchId?.toString() === batch._id.toString()) return true;
+                      // Show archived/completed projects with no batchId under the active batch
+                      if (batch.isActive && !p.batchId && (p.isArchived || p.finalRemark)) return true;
+                      return false;
+                    });
                     const isExpanded = expandedBatches.has(batch._id);
                     
                     return (

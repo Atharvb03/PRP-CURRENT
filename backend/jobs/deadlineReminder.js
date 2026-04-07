@@ -7,7 +7,7 @@
  */
 const cron = require('node-cron');
 const { sendEmail, deadlineReminderEmail } = require('../utils/emailService');
-const { getAllowedPhases, PHASE_CONFIG } = require('../constants/phases');
+const { getAllowedPhases, PHASE_LABELS } = require('../constants/phases');
 
 let _db, _usersCollection;
 
