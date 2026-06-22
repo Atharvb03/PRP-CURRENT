@@ -17,13 +17,14 @@ const { validateEmail, validatePassword } = require('../middleware/validation');
 const { sendEmail, emailVerificationEmail, passwordResetOTPEmail } = require('../utils/emailService');
 const { generateOTP, hashOTP, verifyOTP } = require('../utils/otpService');
 const { COLLECTION: RESET_COL, OTP_EXPIRY_MINUTES, MAX_ATTEMPTS } = require('../models/passwordReset');
+const { getRequestOrigin } = require('../config/cors');
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: process.env.NODE_ENV === 'production' ? 5 : 50,
   message: { success: false, message: 'Too many authentication attempts, please try again later.' },
   handler: (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || 'http://localhost:5173');
+    res.setHeader('Access-Control-Allow-Origin', getRequestOrigin(req));
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.status(429).json({ success: false, message: 'Too many authentication attempts, please try again later.' });
   },

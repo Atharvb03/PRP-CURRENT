@@ -32,44 +32,40 @@ require('dotenv').config();
 
 const { sanitizeBody, sanitizeQuery } = require('./middleware/validation');
 const { errorHandler } = require('./middleware/errorHandler');
+const { corsOptions, getRequestOrigin } = require('./config/cors');
 
 const app = express();
 
-// ── SECURITY HEADERS ──────────────────────────────────────────────────────────
+// SECURITY HEADERS
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      styleSrc:   ["'self'", "'unsafe-inline'"],
-      scriptSrc:  ["'self'"],
-      imgSrc:     ["'self'", 'data:', 'https:'],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:', 'https:'],
     }
   }
 }));
 app.set('trust proxy', 1);
-// ── RATE LIMITING ─────────────────────────────────────────────────────────────
+
+// CORS
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+// RATE LIMITING
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || (process.env.NODE_ENV === 'production' ? 200 : 1000),
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || 'http://localhost:5173');
+    res.setHeader('Access-Control-Allow-Origin', getRequestOrigin(req));
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.status(429).json({ success: false, message: 'Too many requests, please try again later.' });
   },
 });
 app.use('/api/', limiter);
-
-// ── CORS ──────────────────────────────────────────────────────────────────────
-const corsOptions = {
-  origin:         process.env.CORS_ORIGIN || 'http://localhost:5173',
-  credentials:    true,
-  methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
 
 // ── BODY PARSING ──────────────────────────────────────────────────────────────
 app.use(bodyParser.json());
