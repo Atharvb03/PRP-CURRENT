@@ -401,43 +401,29 @@ export default function MenteeDashboard() {
     setUploadProgress(p => ({ ...p, [key]: 0 }));
 
     try {
-      // ── Step 1: get pre-signed PUT URL ──────────────────────────────
-      const urlRes = await axios.post(`${API}/files/generate-upload-url`, {
-        fileName:    file.name,
-        fileType:    file.type || '',
-        section:     key,
-        menteeEmail,
-      });
+      // Upload through the backend so the browser never needs S3 CORS access.
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('section', key);
+      formData.append('menteeEmail', menteeEmail);
 
-      if (!urlRes.data.success) {
-        showToast(`❌ ${urlRes.data.message || 'Could not get upload URL.'}`, 'error');
-        return;
-      }
-
-      const { uploadUrl, s3Key, objectUrl, contentType } = urlRes.data;
-
-      // ── Step 2: PUT directly to S3 with XHR for progress tracking ───
-      await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', uploadUrl);
-        xhr.setRequestHeader('Content-Type', contentType);
-
-        xhr.upload.onprogress = (ev) => {
-          if (ev.lengthComputable) {
+      const uploadRes = await axios.post(`${API}/files/upload`, formData, {
+        onUploadProgress: (ev) => {
+          if (ev.total) {
             const pct = Math.round((ev.loaded / ev.total) * 100);
             setUploadProgress(p => ({ ...p, [key]: pct }));
           }
-        };
-
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve();
-          else reject(new Error(`S3 PUT failed: ${xhr.status} ${xhr.statusText}`));
-        };
-        xhr.onerror = () => reject(new Error('Network error during S3 upload'));
-        xhr.send(file);
+        },
       });
 
-      // ── Step 3: save metadata to DB ─────────────────────────────────
+      if (!uploadRes.data.success) {
+        showToast(`❌ ${uploadRes.data.message || 'Could not upload file.'}`, 'error');
+        return;
+      }
+
+      const { s3Key, objectUrl, contentType } = uploadRes.data;
+
+      // Save metadata to DB after S3 upload succeeds.
       await axios.post(`${API}/files/save-metadata`, {
         fileName:    file.name,
         s3Key,

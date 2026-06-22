@@ -16,6 +16,11 @@ const { sendEmail, fileUploadedEmail, remarkAddedEmail, phaseApprovedEmail } = r
 const { COLLECTION: FILE_COL, ALLOWED_EXTENSIONS, MAX_SIZE_MB, MIME_MAP } = require('../models/fileMetadata');
 const { getAllowedPhases, PHASE_LABELS } = require('../constants/phases');
 
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_SIZE_MB * 1024 * 1024 },
+});
+
 // POST /generate-upload-url — mentee gets a pre-signed S3 PUT URL
 router.post('/generate-upload-url', requireRole('mentee'), async (req, res) => {
   const { db, usersCollection, projectsCollection } = getCollections();
@@ -53,6 +58,54 @@ router.post('/generate-upload-url', requireRole('mentee'), async (req, res) => {
   }
 });
 
+// POST /upload - backend-mediated S3 upload to avoid browser-to-S3 CORS failures
+router.post('/upload', requireRole('mentee'), upload.single('file'), async (req, res) => {
+  const { db, projectsCollection } = getCollections();
+  const { section, menteeEmail } = req.body;
+  const file = req.file;
+
+  if (!file || !section || !menteeEmail)
+    return res.status(400).json({ success: false, message: 'file, section and menteeEmail are required' });
+
+  const normalizedEmail = menteeEmail.toLowerCase();
+  if (req.userEmail !== normalizedEmail)
+    return res.status(403).json({ success: false, message: 'You can only upload files for your own account' });
+
+  const ext = file.originalname.split('.').pop().toLowerCase();
+  if (!ALLOWED_EXTENSIONS.includes(ext))
+    return res.status(400).json({ success: false, message: `File type .${ext} not allowed. Allowed: ${ALLOWED_EXTENSIONS.join(', ')}` });
+
+  const resolvedContentType = (file.mimetype && file.mimetype !== 'application/octet-stream') ? file.mimetype : (MIME_MAP[ext] || 'application/octet-stream');
+
+  try {
+    const assignment = await db.collection('assignments').findOne({ menteeEmail: normalizedEmail, isArchived: { $ne: true } });
+    if (!assignment) return res.status(403).json({ success: false, message: 'Your project is not yet assigned to a mentor.' });
+    if (assignment.finalRemark) return res.status(403).json({ success: false, message: 'Your project has been finalised. Uploads are no longer accepted.' });
+
+    const project = await projectsCollection.findOne({ menteeEmail: normalizedEmail, isArchived: { $ne: true } });
+    const duration = project?.duration || assignment?.duration || '6_months';
+    const allowedPhases = getAllowedPhases(duration);
+    if (!allowedPhases.includes(section))
+      return res.status(400).json({ success: false, message: `This phase is not allowed for this project duration (${duration.replace('_', ' ')})` });
+
+    const uniqueId = crypto.randomBytes(8).toString('hex');
+    const safeFileName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const s3Key = `uploads/${assignment._id}/${section}/${uniqueId}_${safeFileName}`;
+
+    await s3.upload({
+      Bucket: process.env.S3_BUCKET_NAME,
+      Key: s3Key,
+      Body: file.buffer,
+      ContentType: resolvedContentType,
+    }).promise();
+
+    const objectUrl = `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${encodeURIComponent(s3Key).replace(/%2F/g, '/')}`;
+    res.json({ success: true, s3Key, objectUrl, contentType: resolvedContentType });
+  } catch (err) {
+    console.error('S3 upload error:', err);
+    res.status(500).json({ success: false, message: 'Failed to upload file to S3' });
+  }
+});
 // POST /save-metadata — save file info to DB after S3 upload
 router.post('/save-metadata', requireRole('mentee'), async (req, res) => {
   const { db, usersCollection } = getCollections();
